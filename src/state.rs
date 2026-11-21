@@ -1,4 +1,7 @@
-use crate::lyrics::{Key, Lyrics, Request};
+use crate::{
+    lyrics::{Key, Lyrics, Request},
+    spectrum::Spectrum,
+};
 use image::DynamicImage;
 use std::{
     ops::Range,
@@ -75,6 +78,12 @@ impl PresenceStatus {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Visualizer {
+    Ribbons,
+    Spectrum,
+}
+
 #[derive(Default)]
 pub struct Player {
     pub ready: bool,
@@ -86,6 +95,8 @@ pub struct Player {
     pub timing: Option<Timing>,
     pub artwork: Option<DynamicImage>,
     pub artwork_revision: u64,
+    pub visualizer: Option<Visualizer>,
+    pub spectrum: Option<Spectrum>,
     pub lyrics: Option<Lyrics>,
     pub lyric_offset_ms: i64,
     pending_artwork: Option<(DynamicImage, Instant)>,
@@ -96,6 +107,14 @@ pub struct Player {
 }
 
 impl Player {
+    pub fn cycle_visualizer(&mut self) {
+        self.visualizer = match self.visualizer {
+            None => Some(Visualizer::Ribbons),
+            Some(Visualizer::Ribbons) => Some(Visualizer::Spectrum),
+            Some(Visualizer::Spectrum) => None,
+        };
+    }
+
     pub fn set_track(&mut self, track: Option<Track>, now: Instant) {
         if track == self.track {
             return;

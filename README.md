@@ -35,9 +35,12 @@ Use `--uxplay /path/to/uxplay` to select a binary. The default receiver name is 
 | `Space` | Play/Pause |
 | `n` | Next |
 | `d` | Toggle Discord |
+| `v` | Cycle through Cover, Ribbons, and Spectrum |
 | `↑` / `↓` | Scroll lyrics |
 | `[` / `]` | Delay or advance lyrics by 250 ms |
 | `q` | Quit and stop the receiver |
+
+The Ribbons preset uses the live AirPlay audio to rotate and warp neon trails. Spectrum shows 24 frequency bands with falling bars and peak markers. Press `v` to cycle through both presets and the album cover.
 
 LRCLIB lookups send the title, artist, album, and available duration. If the first result has line timings, the player also checks for word timings on a release with the same song, artist, and a similar duration. Results are cached until the player quits. Use `--no-online-lyrics` to disable lookups.
 

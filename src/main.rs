@@ -2,6 +2,7 @@ mod dacp;
 mod discord;
 mod lyrics;
 mod receiver;
+mod spectrum;
 mod state;
 mod terminal;
 mod ui;
@@ -92,6 +93,12 @@ fn main() -> Result<()> {
     while !stop.load(Ordering::Relaxed) {
         session.poll_receiver(&mut receiver, &dacp, Instant::now())?;
         let now = Instant::now();
+        let visualizing = session.player.visualizer.is_some();
+        session.player.spectrum = if session.player.connected && visualizing {
+            receiver.spectrum.latest(now)
+        } else {
+            None
+        };
         sharing.sync(&mut session.player, discord.as_ref(), now);
         if let Some(lyrics) = &lyrics {
             if let Some(request) = session.player.lyrics_request(now) {
@@ -103,7 +110,8 @@ fn main() -> Result<()> {
         }
 
         let screen = terminal.draw(&session.player, &options.name, now)?;
-        if !event::poll(Duration::from_millis(100))? {
+        let frame_ms = if visualizing { 42 } else { 100 };
+        if !event::poll(Duration::from_millis(frame_ms))? {
             continue;
         }
         let action = match event::read()? {
@@ -141,6 +149,7 @@ fn main() -> Result<()> {
                 sharing.enabled = !sharing.enabled;
                 sharing.sync(&mut session.player, discord.as_ref(), Instant::now());
             }
+            Some(Action::CycleVisualizer) => session.player.cycle_visualizer(),
             Some(Action::Scroll(delta)) => {
                 let offset = screen
                     .scroll_top
@@ -182,10 +191,12 @@ impl Session {
                 LogEvent::Connected => self.player.connected = true,
                 LogEvent::StreamStarted => {
                     self.player.stream_started(now);
+                    receiver.spectrum.clear();
                     progress = None;
                 }
                 LogEvent::Disconnected => {
                     self.player.disconnect(now);
+                    receiver.spectrum.clear();
                     self.set_credentials(dacp, None);
                     progress = None;
                 }

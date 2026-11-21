@@ -2,6 +2,67 @@ use crate::{dacp, discord, lyrics, receiver, state, ui};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 #[test]
+fn now_playing_cycles_through_cover_ribbons_and_spectrum() {
+    use crossterm::event::KeyCode;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    assert_eq!(
+        ui::key_action(KeyCode::Char('v')),
+        Some(ui::Action::CycleVisualizer)
+    );
+    let mut player = state::Player::default();
+    player.artwork = Some(image::DynamicImage::new_rgb8(16, 16));
+    let mut spectrum = crate::spectrum::Spectrum::default();
+    spectrum.levels[10] = 0.65;
+    spectrum.peaks[10] = 0.85;
+    player.spectrum = Some(spectrum);
+
+    let now = Instant::now();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    let mut screen = ui::Screen::default();
+    terminal
+        .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now))
+        .unwrap();
+    assert!(screen.cover.is_some());
+
+    for (width, height) in [(100, 30), (48, 25)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        player.cycle_visualizer();
+        terminal
+            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now))
+            .unwrap();
+        assert!(screen.cover.is_none());
+        let ribbons = terminal.backend().buffer().content.clone();
+        assert!(ribbons.iter().any(|cell| {
+            cell.symbol()
+                .starts_with(|dot| ('\u{2801}'..='\u{28ff}').contains(&dot))
+        }));
+        spectrum.phase += 0.8;
+        player.spectrum = Some(spectrum);
+        terminal
+            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now))
+            .unwrap();
+        assert_ne!(terminal.backend().buffer().content, ribbons);
+
+        player.cycle_visualizer();
+        terminal
+            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now))
+            .unwrap();
+        assert!(screen.cover.is_none());
+        let cells = &terminal.backend().buffer().content;
+        assert!(cells.iter().any(|cell| cell.symbol() == "▄"));
+        assert!(cells.iter().any(|cell| cell.symbol() == "━"));
+
+        player.cycle_visualizer();
+        terminal
+            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now))
+            .unwrap();
+        assert_eq!(screen.cover.is_some(), width == 100);
+        assert_eq!(player.visualizer, None);
+    }
+}
+
+#[test]
 fn reads_complete_stock_metadata_and_dacp_exports() {
     let export = include_bytes!("../tests/fixtures/uxplay-metadata");
     assert!(receiver::metadata(&export[..export.len() - 1]).is_none());

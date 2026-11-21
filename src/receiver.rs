@@ -1,4 +1,4 @@
-use crate::{dacp::Credentials, state::Track};
+use crate::{dacp::Credentials, spectrum, state::Track};
 use anyhow::{Context, Result};
 use image::{DynamicImage, ImageFormat, ImageReader, Limits};
 use std::{
@@ -6,7 +6,7 @@ use std::{
     io::{self, BufRead, BufReader, Cursor, Read},
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
-    process::{Child, Command, ExitStatus, Stdio},
+    process::{Child, Command, ExitStatus},
     sync::mpsc::{self, Receiver as Inbox, Sender},
     thread,
     time::{Duration, Instant, SystemTime},
@@ -19,6 +19,7 @@ pub struct Receiver {
     child: Child,
     pub logs: Inbox<LogRecord>,
     pub exports: Exports,
+    pub spectrum: spectrum::Monitor,
     _directory: TempDir,
 }
 
@@ -30,6 +31,17 @@ impl Receiver {
             .tempdir()?;
         let exports = Exports::new(directory.path());
         let (reader, writer) = io::pipe()?;
+        let (pcm, audio) = io::pipe()?;
+        let spectrum = spectrum::Monitor::spawn(pcm)?;
+        // UxPlay appends its clock sync setting to the last sink in this pipeline.
+        let sink = format!(
+            "tee name=visualizer \
+             visualizer. ! queue leaky=downstream max-size-buffers=8 ! audioconvert ! audioresample \
+             ! audio/x-raw,format=S16LE,layout=interleaved,channels=1,rate={} \
+             ! fdsink fd=0 sync=true async=false \
+             visualizer. ! queue ! autoaudiosink",
+            spectrum::SAMPLE_RATE,
+        );
         let mut child = Command::new("stdbuf")
             .args(["-oL", "-eL", "--"])
             .arg(executable)
@@ -40,7 +52,9 @@ impl Receiver {
             .arg(&exports.artwork.path)
             .arg("-dacp")
             .arg(&exports.dacp.path)
-            .stdin(Stdio::null())
+            .args(["-as", &sink])
+            // UxPlay does not read stdin. Pass the private PCM pipe to fdsink on fd 0.
+            .stdin(audio)
             .stdout(writer.try_clone()?)
             .stderr(writer)
             .spawn()
@@ -61,6 +75,7 @@ impl Receiver {
             child,
             logs,
             exports,
+            spectrum,
             _directory: directory,
         })
     }
@@ -168,6 +183,7 @@ pub fn parse_log(line: &str) -> Option<LogEvent> {
         || line.contains("dnssd_register_airplay failed")
         || line.contains("failed to initialize http daemon")
         || line.contains("GStreamer gst_parse_launch failed")
+        || line.contains("gst_parse_launch error (audio")
         || line.contains("stdbuf: failed to run command")
         || line.contains("failed to open configuration file")
     {

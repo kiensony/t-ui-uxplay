@@ -1,6 +1,7 @@
 use crate::{
     dacp::Command,
-    state::{Player, PresenceStatus, format_time},
+    spectrum::{BAND_COUNT, Spectrum},
+    state::{Player, PresenceStatus, Visualizer, format_time},
 };
 use crossterm::event::KeyCode;
 use image::{DynamicImage, imageops::FilterType};
@@ -8,10 +9,14 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style},
+    symbols::Marker,
     text::{Line, Span},
-    widgets::{Block, BorderType, Gauge, Paragraph},
+    widgets::{
+        Block, BorderType, Gauge, Paragraph,
+        canvas::{Canvas, Line as CanvasLine},
+    },
 };
-use std::{ops::Range, time::Instant};
+use std::{f64::consts::TAU, ops::Range, time::Instant};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -23,12 +28,19 @@ const MUTED: Color = Color::Rgb(157, 177, 182);
 const DIM: Color = Color::Rgb(111, 129, 136);
 const ACCENT: Color = Color::Rgb(133, 232, 188);
 const WARNING: Color = Color::Rgb(241, 190, 128);
+const SPECTRUM_BACKGROUND: Color = Color::Rgb(14, 10, 27);
+const SPECTRUM_GRID: Color = Color::Rgb(61, 47, 86);
+const SPECTRUM_LOW: Color = Color::Rgb(89, 241, 130);
+const SPECTRUM_MID: Color = Color::Rgb(226, 243, 107);
+const SPECTRUM_HIGH: Color = Color::Rgb(255, 169, 66);
+const SPECTRUM_PEAK: Color = Color::Rgb(255, 108, 193);
 const LYRIC_SYNC_STEP_MS: i64 = 250;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Transport(Command),
     Discord,
+    CycleVisualizer,
     Scroll(i8),
     AdjustLyricSync(i64),
     Quit,
@@ -47,6 +59,7 @@ pub fn key_action(code: KeyCode) -> Option<Action> {
         KeyCode::Char(' ') => Some(BUTTON_ACTIONS[1]),
         KeyCode::Char('n') => Some(BUTTON_ACTIONS[2]),
         KeyCode::Char('d') => Some(Action::Discord),
+        KeyCode::Char('v') => Some(Action::CycleVisualizer),
         KeyCode::Up => Some(Action::Scroll(-1)),
         KeyCode::Down => Some(Action::Scroll(1)),
         KeyCode::Char('[') => Some(Action::AdjustLyricSync(-LYRIC_SYNC_STEP_MS)),
@@ -121,10 +134,12 @@ pub fn draw(
     header_line(frame, player, name, header);
     draw_progress(frame, player, progress);
     screen.buttons = draw_buttons(frame, player, buttons, columns);
-    let help = if player.connected && !player.transport && hints.width >= 70 {
-        "↑↓ Scroll  [] Sync  d Discord  q Quit  ·  Sender controls unavailable"
+    let help = if player.connected && !player.transport && hints.width >= 80 {
+        "v Visualizer  ↑↓ Scroll  [] Sync  d Discord  q Quit  ·  Sender controls unavailable"
+    } else if hints.width >= 54 {
+        "v Visualizer  ↑↓ Scroll  [] Sync  d Discord  q Quit"
     } else {
-        "↑↓ Scroll  [] Sync  d Discord  q Quit"
+        "v Visualizer  q Quit  ↑↓ Scroll  [] Sync  d Discord"
     };
     frame.render_widget(Paragraph::new(help).style(Style::new().fg(MUTED)), hints);
 
@@ -138,8 +153,13 @@ pub fn draw(
         .areas(body);
         (track, lyrics)
     } else {
+        let track_height = if player.visualizer.is_some() && body.height >= 10 {
+            (body.height / 2).clamp(7, 11)
+        } else {
+            5
+        };
         let [track, lyrics] =
-            Layout::vertical([Constraint::Length(5), Constraint::Min(0)]).areas(body);
+            Layout::vertical([Constraint::Length(track_height), Constraint::Min(0)]).areas(body);
         (track, lyrics)
     };
 
@@ -191,7 +211,12 @@ fn draw_track(
     wide: bool,
     native_graphics: bool,
 ) -> Option<Rect> {
-    let shell = card(" Now Playing ");
+    let title = match player.visualizer {
+        Some(Visualizer::Ribbons) => " Now Playing · Ribbons ",
+        Some(Visualizer::Spectrum) => " Now Playing · Spectrum ",
+        None => " Now Playing ",
+    };
+    let shell = card(title);
     let content = shell.inner(area);
     frame.render_widget(shell, area);
     if content.is_empty() {
@@ -200,7 +225,11 @@ fn draw_track(
 
     let [cover_area, details] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(3)]).areas(content);
-    let details = if wide { details } else { content };
+    let details = if wide || player.visualizer.is_some() {
+        details
+    } else {
+        content
+    };
     let lines = if let Some(track) = &player.track {
         vec![
             Line::styled(track.title.as_str(), Style::new().fg(TEXT).bold()),
@@ -217,6 +246,10 @@ fn draw_track(
     };
     frame.render_widget(Paragraph::new(lines).centered(), details);
 
+    if let Some(visualizer) = player.visualizer {
+        draw_visualizer(frame, cover_area, visualizer, player.spectrum.as_ref());
+        return None;
+    }
     if !wide || cover_area.height < 3 {
         return None;
     }
@@ -241,6 +274,155 @@ fn draw_track(
         );
     }
     None
+}
+
+fn draw_visualizer(
+    frame: &mut Frame,
+    area: Rect,
+    visualizer: Visualizer,
+    spectrum: Option<&Spectrum>,
+) {
+    if area.is_empty() {
+        return;
+    }
+    let inset = u16::from(area.width > 8);
+    let width = area.width - 2 * inset;
+    let plot_width = width.min(3 * BAND_COUNT as u16);
+    let chart_height = area.height.min(plot_width.div_ceil(2));
+    let area = Rect::new(
+        area.x + (area.width - plot_width) / 2,
+        area.y + (area.height - chart_height) / 2,
+        plot_width,
+        chart_height,
+    );
+    frame.render_widget(
+        Block::new().style(Style::new().bg(SPECTRUM_BACKGROUND)),
+        area,
+    );
+    let Some(spectrum) = spectrum else {
+        let message = Rect::new(area.x, area.y + area.height / 2, area.width, 1);
+        frame.render_widget(
+            Paragraph::new("Waiting for audio")
+                .style(Style::new().fg(MUTED))
+                .centered(),
+            message,
+        );
+        return;
+    };
+
+    match visualizer {
+        Visualizer::Ribbons => draw_ribbons(frame, area, spectrum),
+        Visualizer::Spectrum => draw_spectrum(frame, area, spectrum),
+    }
+}
+
+fn draw_ribbons(frame: &mut Frame, area: Rect, spectrum: &Spectrum) {
+    let strongest = |levels: &[f32]| f64::from(levels.iter().copied().fold(0.0, f32::max));
+    let bass = strongest(&spectrum.levels[..8]);
+    let treble = strongest(&spectrum.levels[16..]);
+    let strength = strongest(&spectrum.levels);
+    let rotation = f64::from(spectrum.phase);
+    let aspect = (f64::from(area.width) / (2.0 * f64::from(area.height))).max(1.0);
+    let canvas = Canvas::default()
+        .marker(Marker::Braille)
+        .background_color(SPECTRUM_BACKGROUND)
+        .x_bounds([-aspect, aspect])
+        .y_bounds([-1.0, 1.0])
+        .paint(|context| {
+            // Paint older traces first, then both bright edges of each ribbon.
+            for (lag, edge, blue, rose) in [
+                (0.55, -0.025, Color::Rgb(42, 30, 94), Color::Rgb(88, 19, 63)),
+                (0.27, 0.0, Color::Rgb(93, 63, 204), Color::Rgb(161, 34, 111)),
+                (
+                    0.0,
+                    0.035,
+                    Color::Rgb(109, 113, 254),
+                    Color::Rgb(253, 73, 148),
+                ),
+                (
+                    0.0,
+                    -0.018,
+                    Color::Rgb(113, 243, 255),
+                    Color::Rgb(255, 174, 103),
+                ),
+            ] {
+                let phase = rotation - lag;
+                for (turn, folds, color) in [(phase, 3.0, blue), (2.2 - phase, 4.0, rose)] {
+                    let point = |angle: f64| {
+                        let ripple = (7.0 * angle + turn).sin() * 0.055 * treble;
+                        let radius = 0.46
+                            + 0.17 * bass
+                            + edge
+                            + ripple
+                            + (0.13 + 0.13 * strength) * (folds * angle - turn).cos();
+                        let warp = (2.0 * angle + turn).sin() * (0.20 + 0.11 * strength);
+                        let (y, x) = (angle + turn + warp).sin_cos();
+                        (
+                            radius * x,
+                            radius * y * (0.81 + 0.19 * (angle + turn).cos()),
+                        )
+                    };
+                    const SEGMENTS: u32 = 96;
+                    let (mut x, mut y) = point(0.0);
+                    for segment in 1..=SEGMENTS {
+                        let angle = TAU * f64::from(segment) / f64::from(SEGMENTS);
+                        let (next_x, next_y) = point(angle);
+                        context.draw(&CanvasLine::new(x, y, next_x, next_y, color));
+                        (x, y) = (next_x, next_y);
+                    }
+                }
+            }
+        });
+    frame.render_widget(canvas, area);
+}
+
+fn draw_spectrum(frame: &mut Frame, area: Rect, spectrum: &Spectrum) {
+    let show_labels = area.width >= 22 && area.height >= 5;
+    let plot_height = area.height - u16::from(show_labels);
+    let columns = (area.width / 2).clamp(1, BAND_COUNT as u16);
+    let stride = area.width / columns;
+    let start_x = area.x + (area.width - stride * columns) / 2;
+    let buffer = frame.buffer_mut();
+    for column in 0..columns {
+        let band = |column| usize::from(column) * BAND_COUNT / usize::from(columns);
+        let bands = band(column)..band(column + 1);
+        let height = |values: &[f32]| {
+            let level = values[bands.clone()]
+                .iter()
+                .copied()
+                .fold(0.0_f32, f32::max);
+            (level * f32::from(plot_height)).round() as u16
+        };
+        let level = height(&spectrum.levels);
+        let peak = height(&spectrum.peaks);
+        for row in 0..plot_height {
+            let (symbol, color) = if peak > 0 && row + 1 == peak {
+                ("━", SPECTRUM_PEAK)
+            } else if row < level {
+                let color = match row * 3 / plot_height {
+                    0 => SPECTRUM_LOW,
+                    1 => SPECTRUM_MID,
+                    _ => SPECTRUM_HIGH,
+                };
+                ("▄", color)
+            } else if row % 3 == 0 {
+                ("·", SPECTRUM_GRID)
+            } else {
+                continue;
+            };
+            let y = area.y + plot_height - row - 1;
+            let x = start_x + column * stride;
+            for x in x..x + stride.saturating_sub(1).max(1) {
+                buffer[(x, y)].set_symbol(symbol).set_fg(color);
+            }
+        }
+    }
+    if show_labels {
+        let y = area.bottom() - 1;
+        let label = Style::new().fg(MUTED);
+        buffer.set_string(area.x + 1, y, "50 Hz", label);
+        buffer.set_string(area.right() - 7, y, "12 kHz", label);
+    }
 }
 
 fn fit_cover(area: Rect, image: &DynamicImage) -> Rect {
