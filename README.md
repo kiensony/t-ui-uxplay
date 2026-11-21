@@ -4,31 +4,39 @@ A music-only AirPlay receiver for the terminal. Select it from Apple Music’s A
 
 ## Install
 
-Releases include archives for Linux x64, Windows x64, and Intel and Apple Silicon Macs. Install UxPlay and its GStreamer audio dependencies separately. UxPlay 1.73.7 is the reference version. The packaged 1.73 build also supports the required options and export formats. [GitHub Releases](https://github.com/kiensony/t-ui-uxplay/releases)
+Release archives for Linux x64, Windows x64, and Intel and Apple Silicon Macs include UxPlay. Keep the `uxplay` folder beside the player executable and install the runtime dependencies for your system below. The folder also includes the UxPlay license, patched source, and build script. [GitHub Releases](https://github.com/kiensony/t-ui-uxplay/releases)
 
 After installing the dependencies for your system, extract the archive and run `./t-ui-uxplay` on Linux or macOS, or `.\t-ui-uxplay.exe` in PowerShell.
 
 ### Linux
 
-On Debian or Ubuntu, where UxPlay is packaged:
+On Ubuntu 22.04 or Debian 12:
 
 ```sh
-sudo apt install uxplay avahi-daemon avahi-utils gstreamer1.0-libav gstreamer1.0-plugins-good coreutils
+sudo apt install libplist3 libssl3 libavahi-compat-libdnssd1 avahi-daemon avahi-utils \
+  gstreamer1.0-libav gstreamer1.0-plugins-good gstreamer1.0-plugins-bad coreutils
 ```
 
 Run the player as your desktop user so GStreamer can reach your PipeWire, PulseAudio, or ALSA output. Avahi must be running, and the Linux desktop and sender must be on a network that allows mDNS discovery and AirPlay traffic. The `avahi-browse` utility from `avahi-utils` resolves senders that advertise DACP controls.
 
-For other distributions, see the upstream installation instructions. [UxPlay for Linux](https://github.com/FDH2/UxPlay/blob/v1.73.7/README.md#linux)
+If your distribution ships different shared library versions, install its UxPlay package and use `--uxplay uxplay`. [UxPlay for Linux](https://github.com/FDH2/UxPlay/blob/v1.73.7/README.md#linux)
 
 ### macOS
 
-Install GNU coreutils with `brew install coreutils` so `gstdbuf` is available on `PATH`. Follow the upstream instructions to install UxPlay and GStreamer. [UxPlay for macOS](https://github.com/FDH2/UxPlay/blob/v1.73.7/README.md#building-uxplay-on-macos-intel-x86_64-and-apple-silicon-m1m2-macs)
+Install the official GStreamer 1.28 macOS Universal runtime package. Install the other shared libraries with `brew install libplist openssl@3` using the standard Homebrew prefix for your Mac. [GStreamer downloads](https://gstreamer.freedesktop.org/download/#macos)
 
 ### Windows
 
-Follow the upstream Windows instructions to install UxPlay, Bonjour, and the GStreamer plugins. Launch `t-ui-uxplay.exe` in Windows Terminal with UxPlay and its dependency DLLs on `PATH`. [UxPlay for Windows](https://github.com/FDH2/UxPlay/blob/v1.73.7/README.md#building-uxplay-on-microsoft-windows-using-msys2-with-the-mingw-64-compiler)
+The Windows archive uses a pinned UxPlay 1.74 development build with built-in mDNS. That build advertises AirPlay on an IPv4 interface with a gateway. Install the runtime packages from the MSYS2 UCRT64 terminal. [MSYS2 installation](https://www.msys2.org/)
 
-Stock Windows builds of UxPlay can leave connection status and Discord activity stale until UxPlay flushes its logs. If you build UxPlay from source, add `setvbuf(stdout, nullptr, _IONBF, 0);` at the start of `main` in `uxplay.cpp` to make status updates immediate. [UxPlay source](https://github.com/FDH2/UxPlay/blob/v1.73.7/uxplay.cpp#L221-L241)
+```sh
+pacman -S mingw-w64-ucrt-x86_64-gcc-libs mingw-w64-ucrt-x86_64-libplist \
+  mingw-w64-ucrt-x86_64-openssl \
+  mingw-w64-ucrt-x86_64-gst-libav mingw-w64-ucrt-x86_64-gst-plugins-good \
+  mingw-w64-ucrt-x86_64-gst-plugins-bad
+```
+
+Add `C:\msys64\ucrt64\bin` to `PATH` before running the player from PowerShell, adjusting the path if you installed MSYS2 elsewhere.
 
 ### Build from source
 
@@ -39,7 +47,7 @@ cargo install --locked --path .
 t-ui-uxplay --name "Living Room"
 ```
 
-Use `--uxplay /path/to/uxplay` to select a binary. The default receiver name is `t-ui-uxplay`, and the default executable is `uxplay` on `PATH`. The player starts UxPlay with its own arguments and uses the default GStreamer audio sink.
+Use `--uxplay /path/to/uxplay` to select a binary explicitly. Otherwise, the player tries the bundled copy first and then looks for `uxplay` on `PATH`. External copies use `stdbuf` on Linux or `gstdbuf` from Homebrew coreutils on macOS. The default receiver name is `t-ui-uxplay`.
 
 ## Connect and control playback
 

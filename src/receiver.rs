@@ -21,6 +21,11 @@ use std::{
 use tempfile::TempDir;
 
 const MAX_ART_BYTES: u64 = 16 * 1024 * 1024;
+const UXPLAY_EXECUTABLE: &str = if cfg!(windows) {
+    "uxplay.exe"
+} else {
+    "uxplay"
+};
 
 pub struct Receiver {
     child: Child,
@@ -31,7 +36,12 @@ pub struct Receiver {
 }
 
 impl Receiver {
-    pub fn spawn(executable: &Path, name: &str) -> Result<Self> {
+    pub fn spawn(executable: Option<&Path>, name: &str) -> Result<Self> {
+        let player = std::env::current_exe().ok();
+        Self::start(receiver_command(executable, player.as_deref()), name)
+    }
+
+    pub(crate) fn start(mut command: Command, name: &str) -> Result<Self> {
         let mut builder = tempfile::Builder::new();
         builder.prefix("t-ui-uxplay-");
         #[cfg(unix)]
@@ -53,7 +63,6 @@ impl Receiver {
              visualizer. ! queue ! autoaudiosink",
             spectrum::SAMPLE_RATE,
         );
-        let mut command = receiver_command(executable);
         let mut child = command
             .arg("-rc")
             .arg(&config)
@@ -72,9 +81,8 @@ impl Receiver {
             .spawn()
             .with_context(|| {
                 format!(
-                    "Could not start {} using {}",
-                    executable.display(),
-                    command.get_program().to_string_lossy()
+                    "Could not start UxPlay using {}",
+                    Path::new(command.get_program()).display()
                 )
             })?;
 
@@ -103,8 +111,23 @@ impl Receiver {
     }
 }
 
+fn receiver_command(executable: Option<&Path>, player: Option<&Path>) -> Command {
+    if executable.is_none()
+        && let Some(player) = player
+    {
+        let bundled = player.with_file_name("uxplay").join(UXPLAY_EXECUTABLE);
+        if bundled.is_file() {
+            // The packaged receiver flushes its logs directly.
+            return Command::new(bundled);
+        }
+    }
+
+    let executable = executable.unwrap_or_else(|| Path::new(UXPLAY_EXECUTABLE));
+    external_command(executable)
+}
+
 #[cfg(unix)]
-fn receiver_command(executable: &Path) -> Command {
+fn external_command(executable: &Path) -> Command {
     #[cfg(target_os = "macos")]
     let program = "gstdbuf";
     #[cfg(not(target_os = "macos"))]
@@ -115,7 +138,7 @@ fn receiver_command(executable: &Path) -> Command {
 }
 
 #[cfg(windows)]
-fn receiver_command(executable: &Path) -> Command {
+fn external_command(executable: &Path) -> Command {
     Command::new(executable)
 }
 
@@ -395,10 +418,34 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[test]
+    fn chooses_the_bundled_receiver_unless_overridden() {
+        let directory = tempfile::tempdir().unwrap();
+        let player = directory.path().join("t-ui-uxplay");
+        let bundle = directory.path().join("uxplay");
+        fs::create_dir(&bundle).unwrap();
+        let bundled = bundle.join(UXPLAY_EXECUTABLE);
+        let command = receiver_command(None, Some(&player));
+        let fallback = external_command(Path::new(UXPLAY_EXECUTABLE));
+        assert_eq!(command.get_program(), fallback.get_program());
+        assert!(command.get_args().eq(fallback.get_args()));
+
+        fs::write(&bundled, b"").unwrap();
+        let command = receiver_command(None, Some(&player));
+        assert_eq!(command.get_program(), bundled.as_os_str());
+        assert!(command.get_args().next().is_none());
+
+        let custom = directory.path().join("custom-uxplay");
+        let command = receiver_command(Some(&custom), Some(&player));
+        let overridden = external_command(&custom);
+        assert_eq!(command.get_program(), overridden.get_program());
+        assert!(command.get_args().eq(overridden.get_args()));
+    }
+
     #[cfg(unix)]
     #[test]
     fn receiver_export_directory_is_owner_only_and_removed_on_drop() {
-        let receiver = Receiver::spawn(Path::new("/usr/bin/true"), "Test").unwrap();
+        let receiver = Receiver::start(Command::new("/usr/bin/true"), "Test").unwrap();
         let path = receiver._directory.path().to_owned();
         let permissions = fs::metadata(&path).unwrap().permissions();
         assert_eq!(permissions.mode() & 0o077, 0);

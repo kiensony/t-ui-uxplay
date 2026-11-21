@@ -41,9 +41,9 @@ struct Options {
     #[arg(long, default_value = "t-ui-uxplay", value_parser = receiver_name)]
     name: String,
 
-    /// UxPlay executable or path
-    #[arg(long, default_value = "uxplay")]
-    uxplay: PathBuf,
+    /// UxPlay executable or path. Defaults to the bundled receiver, then PATH.
+    #[arg(long)]
+    uxplay: Option<PathBuf>,
 
     /// Application ID from the Discord Developer Portal
     #[arg(long, value_parser = application_id)]
@@ -83,7 +83,7 @@ fn main() -> Result<()> {
         stop
     };
     let mut terminal = PlayerTerminal::open()?;
-    let mut receiver = Receiver::spawn(&options.uxplay, &options.name)?;
+    let mut receiver = Receiver::spawn(options.uxplay.as_deref(), &options.name)?;
     let dacp = dacp::Worker::spawn()?;
     let lyrics = (!options.no_online_lyrics)
         .then(lyrics::Worker::spawn)
@@ -330,7 +330,7 @@ mod tests {
         );
         fs::write(&binary, script).unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
-        let mut receiver = Receiver::spawn(&binary, "Test").unwrap();
+        let mut receiver = Receiver::start(std::process::Command::new(&binary), "Test").unwrap();
         let dacp = dacp::Worker::spawn().unwrap();
         let mut session = Session::default();
         let deadline = Instant::now() + Duration::from_secs(2);

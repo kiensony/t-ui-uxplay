@@ -40,10 +40,6 @@ jobs:
         shell: bash
         run: rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt,clippy --target "${{ matrix.target }}"
 
-      - name: Install GNU coreutils for the receiver tests
-        if: runner.os == 'macOS'
-        run: brew install coreutils
-
       - name: Check formatting
         if: runner.os == 'Linux'
         shell: bash
@@ -58,15 +54,62 @@ jobs:
           cargo +"$RUST_VERSION" test --locked --target "$TARGET"
           cargo +"$RUST_VERSION" build --locked --target "$TARGET" --release
 
+      - name: Install Linux UxPlay build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libavahi-compat-libdnssd-dev libplist-dev libssl-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+      - name: Install macOS UxPlay build dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          GSTREAMER_VERSION: 1.28.9
+        run: |
+          brew install libplist openssl@3
+          for package in "gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" \
+                         "gstreamer-1.0-devel-$GSTREAMER_VERSION-universal.pkg"; do
+            curl --fail --show-error --silent --location --retry 3 \
+              "https://gstreamer.freedesktop.org/data/pkg/osx/$GSTREAMER_VERSION/$package" \
+              -o "$RUNNER_TEMP/$package"
+            sudo installer -pkg "$RUNNER_TEMP/$package" -target /
+          done
+
+      - name: Install Windows UxPlay build dependencies
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            curl patch
+            mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-libplist mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-gstreamer mingw-w64-ucrt-x86_64-gst-plugins-base
+
+      - name: Build bundled UxPlay on Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash .github/scripts/bundle-uxplay.sh package/uxplay
+
+      - name: Build bundled UxPlay on Windows
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: bash .github/scripts/bundle-uxplay.sh package/uxplay
+
       - name: Package the Unix binary
         if: runner.os != 'Windows'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          "target/$TARGET/release/t-ui-uxplay" --version
           mkdir -p dist
-          tar -czf "dist/t-ui-uxplay-$TARGET.tar.gz" README.md -C "target/$TARGET/release" t-ui-uxplay
+          install -m 755 "target/$TARGET/release/t-ui-uxplay" package/t-ui-uxplay
+          cp README.md package/
+          package/t-ui-uxplay --version
+          tar -czf "dist/t-ui-uxplay-$TARGET.tar.gz" -C package README.md t-ui-uxplay uxplay
 
       - name: Package the Windows binary
         if: runner.os == 'Windows'
@@ -74,11 +117,11 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          $binary = "target/$env:TARGET/release/t-ui-uxplay.exe"
-          & $binary --version
+          Copy-Item "target/$env:TARGET/release/t-ui-uxplay.exe", README.md -Destination package
+          & ./package/t-ui-uxplay.exe --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Path dist | Out-Null
-          Compress-Archive -LiteralPath $binary, README.md -DestinationPath "dist/t-ui-uxplay-$env:TARGET.zip"
+          Compress-Archive -LiteralPath package/t-ui-uxplay.exe, package/README.md, package/uxplay -DestinationPath "dist/t-ui-uxplay-$env:TARGET.zip"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

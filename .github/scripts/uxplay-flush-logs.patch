@@ -1,0 +1,14 @@
+--- a/uxplay.cpp
++++ b/uxplay.cpp
+@@ -2870,3 +2870,4 @@
+ int main (int argc, char *argv[]) {
++    setvbuf(stdout, NULL, _IONBF, 0);
+     LOGI("*=== Using gst_macos_main wrapper for GStreamer >= 1.22 on macOS ===*");
+     return  gst_macos_main ((GstMainFunc) real_main, argc, argv , NULL);
+@@ -2876,5 +2877,6 @@
+ #else
+ int main (int argc, char *argv[]) {
++    setvbuf(stdout, NULL, _IONBF, 0);
+ #endif
+     std::vector<char> server_hw_addr;
+     std::string config_file = "";
