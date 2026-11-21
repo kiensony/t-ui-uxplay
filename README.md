@@ -31,6 +31,19 @@ Extract the entire Windows ZIP and run `t-ui-uxplay.exe` in Windows Terminal. Th
 
 The Windows archive uses a pinned UxPlay 1.74 development build with built-in mDNS. It advertises AirPlay on an IPv4 interface with a gateway.
 
+#### Windows DLL sources
+
+The Windows build copies these DLLs from MSYS2 UCRT64 packages.
+
+| Bundled DLL | MSYS2 UCRT64 package | Source recipe |
+| --- | --- | --- |
+| `libgcc_s_seh-1.dll` | `mingw-w64-ucrt-x86_64-libgcc` | [GCC](https://github.com/msys2/MINGW-packages/tree/master/mingw-w64-gcc) |
+| `libstdc++-6.dll` | `mingw-w64-ucrt-x86_64-libstdc++` | [GCC](https://github.com/msys2/MINGW-packages/tree/master/mingw-w64-gcc) |
+| `libwinpthread-1.dll` | `mingw-w64-ucrt-x86_64-libwinpthread` | [MinGW-w64 winpthreads](https://github.com/msys2/MINGW-packages/tree/master/mingw-w64-winpthreads) |
+| `libcrypto-4-x64.dll` | `mingw-w64-ucrt-x86_64-openssl` | [OpenSSL](https://github.com/msys2/MINGW-packages/tree/master/mingw-w64-openssl) |
+
+Each Windows ZIP includes `uxplay/runtime-licenses/MSYS2-runtime-sources.txt`. It lists the exact package versions, licenses, and source archive URLs for the bundled MSYS2 runtime, including GStreamer and its dependencies.
+
 ### Build from source
 
 Build with Rust 1.88 or newer:
