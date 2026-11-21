@@ -54,12 +54,23 @@ jobs:
           cargo +"$RUST_VERSION" test --locked --target "$TARGET"
           cargo +"$RUST_VERSION" build --locked --target "$TARGET" --release
 
-      - name: Install Linux UxPlay build dependencies
+      - name: Build bundled UxPlay on Linux
         if: runner.os == 'Linux'
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libavahi-compat-libdnssd-dev libplist-dev libssl-dev \
-            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+          mkdir -p package/uxplay
+          # Build against Jammy without the runner image's conflicting LLVM packages.
+          docker run --rm --workdir /workspace \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/package/uxplay,target=/bundle" \
+            ubuntu:22.04 bash -euo pipefail -c '
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                ca-certificates cmake curl g++ ninja-build patch pkg-config \
+                libavahi-compat-libdnssd-dev libplist-dev libssl-dev \
+                libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+              bash .github/scripts/bundle-uxplay.sh /bundle
+            '
 
       - name: Install macOS UxPlay build dependencies
         if: runner.os == 'macOS'
@@ -89,8 +100,8 @@ jobs:
             mingw-w64-ucrt-x86_64-libplist mingw-w64-ucrt-x86_64-openssl
             mingw-w64-ucrt-x86_64-gstreamer mingw-w64-ucrt-x86_64-gst-plugins-base
 
-      - name: Build bundled UxPlay on Unix
-        if: runner.os != 'Windows'
+      - name: Build bundled UxPlay on macOS
+        if: runner.os == 'macOS'
         shell: bash
         run: bash .github/scripts/bundle-uxplay.sh package/uxplay
 
