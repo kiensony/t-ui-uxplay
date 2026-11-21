@@ -88,6 +88,11 @@ cp "$source_dir/LICENSE" "$destination/LICENSE"
 cp "$script_dir/bundle-uxplay.sh" "$script_dir/uxplay-flush-logs.patch" "$destination/"
 tar -czf "$destination/source.tar.gz" -C "$workspace" "UxPlay-$revision"
 
+if [[ "$executable" == uxplay.exe ]]; then
+  bash "$script_dir/bundle-windows-runtime.sh" "$destination"
+  cp "$script_dir/bundle-windows-runtime.sh" "$destination/"
+fi
+
 touch "$workspace/empty.conf"
 version_output=$("$destination/$executable" -rc "$workspace/empty.conf" -v)
 printf '%s\n' "$version_output"

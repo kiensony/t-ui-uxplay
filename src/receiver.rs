@@ -115,15 +115,32 @@ fn receiver_command(executable: Option<&Path>, player: Option<&Path>) -> Command
     if executable.is_none()
         && let Some(player) = player
     {
-        let bundled = player.with_file_name("uxplay").join(UXPLAY_EXECUTABLE);
+        let directory = player.with_file_name("uxplay");
+        let bundled = directory.join(UXPLAY_EXECUTABLE);
         if bundled.is_file() {
             // The packaged receiver flushes its logs directly.
-            return Command::new(bundled);
+            let command = Command::new(bundled);
+            #[cfg(windows)]
+            let command = configure_bundled_gstreamer(command, &directory);
+            return command;
         }
     }
 
     let executable = executable.unwrap_or_else(|| Path::new(UXPLAY_EXECUTABLE));
     external_command(executable)
+}
+
+#[cfg(windows)]
+fn configure_bundled_gstreamer(mut command: Command, directory: &Path) -> Command {
+    let plugins = directory.join("plugins");
+    let scanner = directory.join("gst-plugin-scanner.exe");
+    if plugins.is_dir() && scanner.is_file() {
+        command
+            .env("GST_PLUGIN_SYSTEM_PATH_1_0", plugins)
+            .env("GST_PLUGIN_PATH_1_0", "")
+            .env("GST_PLUGIN_SCANNER_1_0", scanner);
+    }
+    command
 }
 
 #[cfg(unix)]
@@ -440,6 +457,43 @@ mod tests {
         let overridden = external_command(&custom);
         assert_eq!(command.get_program(), overridden.get_program());
         assert!(command.get_args().eq(overridden.get_args()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn selects_the_packaged_gstreamer_runtime_only_for_the_bundled_receiver() {
+        use std::ffi::OsStr;
+
+        let directory = tempfile::tempdir().unwrap();
+        let player = directory.path().join("t-ui-uxplay.exe");
+        let bundle = directory.path().join("uxplay");
+        let plugins = bundle.join("plugins");
+        let scanner = bundle.join("gst-plugin-scanner.exe");
+        let receiver = bundle.join(UXPLAY_EXECUTABLE);
+        fs::create_dir_all(&plugins).unwrap();
+        fs::write(&scanner, b"").unwrap();
+        fs::write(&receiver, b"").unwrap();
+
+        let command = receiver_command(None, Some(&player));
+        let settings: std::collections::HashMap<_, _> = command.get_envs().collect();
+        assert_eq!(
+            settings[OsStr::new("GST_PLUGIN_SYSTEM_PATH_1_0")],
+            Some(plugins.as_os_str())
+        );
+        assert_eq!(
+            settings[OsStr::new("GST_PLUGIN_PATH_1_0")],
+            Some(OsStr::new(""))
+        );
+        assert_eq!(
+            settings[OsStr::new("GST_PLUGIN_SCANNER_1_0")],
+            Some(scanner.as_os_str())
+        );
+        assert!(
+            receiver_command(Some(&receiver), Some(&player))
+                .get_envs()
+                .next()
+                .is_none()
+        );
     }
 
     #[cfg(unix)]

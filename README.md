@@ -27,15 +27,9 @@ Install the official GStreamer 1.28 macOS Universal runtime package and run `bre
 
 ### Windows
 
-The Windows archive uses a pinned UxPlay 1.74 development build with built-in mDNS. That build advertises AirPlay on an IPv4 interface with a gateway. Install the runtime packages from the MSYS2 UCRT64 terminal. [MSYS2 installation](https://www.msys2.org/)
+Extract the entire Windows ZIP and run `t-ui-uxplay.exe` in Windows Terminal. The archive includes the UxPlay audio runtime, including GStreamer, OpenSSL, and the MinGW DLLs.
 
-```sh
-pacman -S mingw-w64-ucrt-x86_64-gcc-libs mingw-w64-ucrt-x86_64-openssl \
-  mingw-w64-ucrt-x86_64-gst-libav mingw-w64-ucrt-x86_64-gst-plugins-good \
-  mingw-w64-ucrt-x86_64-gst-plugins-bad
-```
-
-Add `C:\msys64\ucrt64\bin` to `PATH` before running the player from PowerShell, adjusting the path if you installed MSYS2 elsewhere.
+The Windows archive uses a pinned UxPlay 1.74 development build with built-in mDNS. It advertises AirPlay on an IPv4 interface with a gateway.
 
 ### Build from source
 

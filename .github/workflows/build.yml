@@ -13,6 +13,7 @@ permissions:
 env:
   RUST_VERSION: 1.88.0
   CARGO_TERM_COLOR: always
+  CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
 
 jobs:
   build:
@@ -90,6 +91,8 @@ jobs:
             mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-openssl
             mingw-w64-ucrt-x86_64-gstreamer mingw-w64-ucrt-x86_64-gst-plugins-base
+            mingw-w64-ucrt-x86_64-gst-plugins-good mingw-w64-ucrt-x86_64-gst-plugins-bad
+            mingw-w64-ucrt-x86_64-gst-libav
 
       - name: Build bundled UxPlay on macOS
         if: runner.os == 'macOS'
@@ -100,6 +103,29 @@ jobs:
         if: runner.os == 'Windows'
         shell: msys2 {0}
         run: bash .github/scripts/bundle-uxplay.sh package/uxplay
+
+      - name: Verify the bundled Windows runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bundle = (Resolve-Path package/uxplay).Path
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
+          $env:GST_PLUGIN_SYSTEM_PATH_1_0 = "$bundle\plugins"
+          $env:GST_PLUGIN_PATH_1_0 = ''
+          $env:GST_PLUGIN_SCANNER_1_0 = "$bundle\gst-plugin-scanner.exe"
+          $env:GST_REGISTRY = "$env:RUNNER_TEMP\uxplay-gst-registry.bin"
+
+          $version = & "$bundle\uxplay.exe" -v
+          if ($LASTEXITCODE -ne 0 -or ($version -join "`n") -notmatch '(?m)^UxPlay version ') {
+            throw "The packaged UxPlay receiver did not start"
+          }
+          foreach ($element in @('appsrc', 'audioconvert', 'audioresample', 'autoaudiosink',
+                                'avdec_aac', 'avdec_alac', 'decodebin', 'fdsink',
+                                'h264parse', 'level', 'queue', 'tee', 'volume', 'wasapi2sink')) {
+            & "$bundle\gst-inspect-1.0.exe" --exists $element
+            if ($LASTEXITCODE -ne 0) { throw "The Windows bundle is missing GStreamer element $element" }
+          }
+          Remove-Item -LiteralPath "$bundle\gst-inspect-1.0.exe"
 
       - name: Lint, test, and build
         shell: bash
@@ -129,6 +155,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           Copy-Item "target/$env:TARGET/release/t-ui-uxplay.exe", README.md -Destination package
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
           & ./package/t-ui-uxplay.exe --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Path dist | Out-Null
