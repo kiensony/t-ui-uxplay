@@ -57,7 +57,7 @@ jobs:
             ubuntu:22.04 bash -euo pipefail -c '
               apt-get update
               DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                ca-certificates cmake curl g++ make ninja-build patch pkg-config \
+                bzip2 ca-certificates cmake curl g++ make ninja-build patch pkg-config \
                 libavahi-compat-libdnssd-dev libssl-dev \
                 libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
               bash .github/scripts/bundle-uxplay.sh /bundle
@@ -85,7 +85,7 @@ jobs:
           msystem: UCRT64
           update: true
           install: >-
-            curl make patch
+            bzip2 curl make patch
             mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-openssl
