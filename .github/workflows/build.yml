@@ -45,15 +45,6 @@ jobs:
         shell: bash
         run: cargo +"$RUST_VERSION" fmt --all -- --check
 
-      - name: Lint, test, and build
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          cargo +"$RUST_VERSION" clippy --locked --target "$TARGET" --all-targets -- -D warnings
-          cargo +"$RUST_VERSION" test --locked --target "$TARGET"
-          cargo +"$RUST_VERSION" build --locked --target "$TARGET" --release
-
       - name: Build bundled UxPlay on Linux
         if: runner.os == 'Linux'
         shell: bash
@@ -66,8 +57,8 @@ jobs:
             ubuntu:22.04 bash -euo pipefail -c '
               apt-get update
               DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                ca-certificates cmake curl g++ ninja-build patch pkg-config \
-                libavahi-compat-libdnssd-dev libplist-dev libssl-dev \
+                ca-certificates cmake curl g++ make ninja-build patch pkg-config \
+                libavahi-compat-libdnssd-dev libssl-dev \
                 libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
               bash .github/scripts/bundle-uxplay.sh /bundle
             '
@@ -78,7 +69,7 @@ jobs:
         env:
           GSTREAMER_VERSION: 1.28.9
         run: |
-          brew install libplist openssl@3
+          brew install openssl@3
           for package in "gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" \
                          "gstreamer-1.0-devel-$GSTREAMER_VERSION-universal.pkg"; do
             curl --fail --show-error --silent --location --retry 3 \
@@ -94,10 +85,10 @@ jobs:
           msystem: UCRT64
           update: true
           install: >-
-            curl patch
+            curl make patch
             mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-pkgconf
-            mingw-w64-ucrt-x86_64-libplist mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-openssl
             mingw-w64-ucrt-x86_64-gstreamer mingw-w64-ucrt-x86_64-gst-plugins-base
 
       - name: Build bundled UxPlay on macOS
@@ -109,6 +100,15 @@ jobs:
         if: runner.os == 'Windows'
         shell: msys2 {0}
         run: bash .github/scripts/bundle-uxplay.sh package/uxplay
+
+      - name: Lint, test, and build
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo +"$RUST_VERSION" clippy --locked --target "$TARGET" --all-targets -- -D warnings
+          cargo +"$RUST_VERSION" test --locked --target "$TARGET"
+          cargo +"$RUST_VERSION" build --locked --target "$TARGET" --release
 
       - name: Package the Unix binary
         if: runner.os != 'Windows'

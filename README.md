@@ -4,7 +4,7 @@ A music-only AirPlay receiver for the terminal. Select it from Apple Music’s A
 
 ## Install
 
-Release archives for Linux x64, Windows x64, and Intel and Apple Silicon Macs include UxPlay. Keep the `uxplay` folder beside the player executable and install the runtime dependencies for your system below. The folder also includes the UxPlay license, patched source, and build script. [GitHub Releases](https://github.com/kiensony/t-ui-uxplay/releases)
+Release archives for Linux x64, Windows x64, and Intel and Apple Silicon Macs include UxPlay and libplist. Keep the `uxplay` folder beside the player executable and install the runtime dependencies for your system below. The folder also includes the source, licenses, and build script. [GitHub Releases](https://github.com/kiensony/t-ui-uxplay/releases)
 
 After installing the dependencies for your system, extract the archive and run `./t-ui-uxplay` on Linux or macOS, or `.\t-ui-uxplay.exe` in PowerShell.
 
@@ -13,7 +13,7 @@ After installing the dependencies for your system, extract the archive and run `
 On Ubuntu 22.04 or Debian 12:
 
 ```sh
-sudo apt install libplist3 libssl3 libavahi-compat-libdnssd1 avahi-daemon avahi-utils \
+sudo apt install libssl3 libavahi-compat-libdnssd1 avahi-daemon avahi-utils \
   gstreamer1.0-libav gstreamer1.0-plugins-good gstreamer1.0-plugins-bad coreutils
 ```
 
@@ -23,15 +23,14 @@ If your distribution ships different shared library versions, install its UxPlay
 
 ### macOS
 
-Install the official GStreamer 1.28 macOS Universal runtime package. Install the other shared libraries with `brew install libplist openssl@3` using the standard Homebrew prefix for your Mac. [GStreamer downloads](https://gstreamer.freedesktop.org/download/#macos)
+Install the official GStreamer 1.28 macOS Universal runtime package and run `brew install openssl@3` using the standard Homebrew prefix for your Mac. [GStreamer downloads](https://gstreamer.freedesktop.org/download/#macos)
 
 ### Windows
 
 The Windows archive uses a pinned UxPlay 1.74 development build with built-in mDNS. That build advertises AirPlay on an IPv4 interface with a gateway. Install the runtime packages from the MSYS2 UCRT64 terminal. [MSYS2 installation](https://www.msys2.org/)
 
 ```sh
-pacman -S mingw-w64-ucrt-x86_64-gcc-libs mingw-w64-ucrt-x86_64-libplist \
-  mingw-w64-ucrt-x86_64-openssl \
+pacman -S mingw-w64-ucrt-x86_64-gcc-libs mingw-w64-ucrt-x86_64-openssl \
   mingw-w64-ucrt-x86_64-gst-libav mingw-w64-ucrt-x86_64-gst-plugins-good \
   mingw-w64-ucrt-x86_64-gst-plugins-bad
 ```
