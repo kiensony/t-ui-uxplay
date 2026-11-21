@@ -1,0 +1,146 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v[0-9]*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: 1.88.0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        shell: bash
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt,clippy --target "${{ matrix.target }}"
+
+      - name: Install GNU coreutils for the receiver tests
+        if: runner.os == 'macOS'
+        run: brew install coreutils
+
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        shell: bash
+        run: cargo +"$RUST_VERSION" fmt --all -- --check
+
+      - name: Lint, test, and build
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo +"$RUST_VERSION" clippy --locked --target "$TARGET" --all-targets -- -D warnings
+          cargo +"$RUST_VERSION" test --locked --target "$TARGET"
+          cargo +"$RUST_VERSION" build --locked --target "$TARGET" --release
+
+      - name: Package the Unix binary
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          "target/$TARGET/release/t-ui-uxplay" --version
+          mkdir -p dist
+          tar -czf "dist/t-ui-uxplay-$TARGET.tar.gz" README.md -C "target/$TARGET/release" t-ui-uxplay
+
+      - name: Package the Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          $binary = "target/$env:TARGET/release/t-ui-uxplay.exe"
+          & $binary --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Compress-Archive -LiteralPath $binary, README.md -DestinationPath "dist/t-ui-uxplay-$env:TARGET.zip"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: t-ui-uxplay-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+
+  release:
+    name: Publish GitHub release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.ref }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          pattern: t-ui-uxplay-*
+          merge-multiple: true
+
+      - name: Publish all platform archives
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          assets=(
+            dist/t-ui-uxplay-x86_64-unknown-linux-gnu.tar.gz
+            dist/t-ui-uxplay-x86_64-apple-darwin.tar.gz
+            dist/t-ui-uxplay-aarch64-apple-darwin.tar.gz
+            dist/t-ui-uxplay-x86_64-pc-windows-msvc.zip
+          )
+          for asset in "${assets[@]}"; do
+            test -s "$asset"
+          done
+
+          if release=$(gh release view "$TAG" --json isDraft,assets); then
+            if [[ $(jq -r '.isDraft' <<< "$release") == true ]]; then
+              gh release upload "$TAG" "${assets[@]}" --clobber
+              gh release edit "$TAG" --draft=false
+            else
+              missing=()
+              for asset in "${assets[@]}"; do
+                if ! jq -e --arg name "${asset##*/}" 'any(.assets[]; .name == $name)' <<< "$release" >/dev/null; then
+                  missing+=("$asset")
+                fi
+              done
+              if (( ${#missing[@]} > 0 )); then
+                gh release upload "$TAG" "${missing[@]}"
+              fi
+            fi
+          else
+            flags=(--verify-tag --generate-notes)
+            if [[ "$TAG" == *-* ]]; then
+              flags+=(--prerelease)
+            fi
+            gh release create "$TAG" "${assets[@]}" "${flags[@]}"
+          fi

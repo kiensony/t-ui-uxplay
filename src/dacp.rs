@@ -1,8 +1,11 @@
+#[cfg(not(any(target_os = "macos", windows)))]
 use std::{
     ffi::CString,
+    process::{Command as Process, Stdio},
+};
+use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::{IpAddr, SocketAddr, SocketAddrV6, TcpStream},
-    process::{Command as Process, Stdio},
     sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
     thread,
     time::{Duration, Instant},
@@ -11,6 +14,7 @@ use std::{
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(5);
 const IO_TIMEOUT: Duration = Duration::from_millis(900);
 const SERVICE_TYPE: &str = "_dacp._tcp";
+const SERVICE_PREFIX: &str = "iTunes_Ctrl_";
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Credentials {
@@ -55,6 +59,7 @@ impl Command {
     }
 }
 
+#[cfg(not(any(target_os = "macos", windows)))]
 fn discover(credentials: &Credentials) -> Option<SocketAddr> {
     let output = Process::new("timeout")
         .args([
@@ -71,6 +76,15 @@ fn discover(credentials: &Credentials) -> Option<SocketAddr> {
     resolve(&String::from_utf8_lossy(&output.stdout), &credentials.id)
 }
 
+fn is_sender(instance: &str, id: &str) -> bool {
+    instance.strip_prefix(SERVICE_PREFIX).is_some_and(|suffix| {
+        suffix
+            .trim_start_matches('0')
+            .eq_ignore_ascii_case(id.trim_start_matches('0'))
+    })
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 fn resolve(output: &str, id: &str) -> Option<SocketAddr> {
     output
         .lines()
@@ -91,11 +105,7 @@ fn resolve(output: &str, id: &str) -> Option<SocketAddr> {
             else {
                 return None;
             };
-            let suffix = instance.strip_prefix("iTunes_Ctrl_")?;
-            if !suffix
-                .trim_start_matches('0')
-                .eq_ignore_ascii_case(id.trim_start_matches('0'))
-            {
+            if !is_sender(instance, id) {
                 return None;
             }
             let port = port.parse::<u16>().ok().filter(|number| *number > 0)?;
@@ -111,6 +121,49 @@ fn resolve(output: &str, id: &str) -> Option<SocketAddr> {
             Some(SocketAddr::new(ip, port))
         })
         .min_by_key(|address| address.is_ipv6())
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn discover(credentials: &Credentials) -> Option<SocketAddr> {
+    use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent};
+
+    let daemon = ServiceDaemon::new().ok()?;
+    let endpoint = (|| {
+        let events = daemon.browse(&format!("{SERVICE_TYPE}.local.")).ok()?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            let event = events
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .ok()?;
+            let ServiceEvent::ServiceResolved(service) = event else {
+                continue;
+            };
+            let port = service.get_port();
+            let Some((instance, _)) = service.get_fullname().split_once('.') else {
+                continue;
+            };
+            if port == 0 || !is_sender(instance, &credentials.id) {
+                continue;
+            }
+            let address = service
+                .get_addresses()
+                .iter()
+                .filter_map(|address| match address {
+                    ScopedIp::V6(ip) if ip.addr().is_unicast_link_local() => {
+                        let scope = ip.scope_id().index;
+                        (scope != 0).then(|| SocketAddrV6::new(*ip.addr(), port, 0, scope).into())
+                    }
+                    ip => Some(SocketAddr::new(ip.to_ip_addr(), port)),
+                })
+                .min_by_key(SocketAddr::is_ipv6);
+            if address.is_some() {
+                return address;
+            }
+        }
+        None
+    })();
+    let _ = daemon.shutdown();
+    endpoint
 }
 
 fn control(address: SocketAddr, credentials: &Credentials, command: Command) -> io::Result<()> {
@@ -218,8 +271,9 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixStream;
+    use std::net::TcpListener;
 
+    #[cfg(not(any(target_os = "macos", windows)))]
     #[test]
     fn resolves_only_the_current_senders_service() {
         let results = concat!(
@@ -234,8 +288,17 @@ mod tests {
     }
 
     #[test]
+    fn matches_sender_ids_case_insensitively_and_ignores_padding() {
+        assert!(is_sender("iTunes_Ctrl_000B1", "b1"));
+        assert!(!is_sender("iTunes_Ctrl_000B1", "b2"));
+        assert!(!is_sender("Other_Ctrl_000B1", "b1"));
+    }
+
+    #[test]
     fn sends_only_the_requested_command_with_the_active_remote_header() {
-        let (client, server) = UnixStream::pair().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
         server
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();

@@ -684,14 +684,12 @@ lines:
     }
     use std::{
         io::{BufRead, BufReader, Write},
-        os::unix::net::UnixListener,
+        net::TcpListener,
     };
 
     #[test]
     fn upgrades_line_lyrics_from_a_compatible_release_and_caches_the_upgrade() {
-        let directory = tempfile::tempdir().unwrap();
-        let socket = directory.path().join("lrclib.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
+        let (client, listener) = mock_client();
         let server = thread::spawn(move || {
             respond(
                 &listener,
@@ -724,11 +722,6 @@ lines:
             });
             respond(&listener, "/api/get/11", &timed.to_string());
         });
-        let client = Client::builder()
-            .unix_socket(socket)
-            .timeout(Duration::from_secs(2))
-            .build()
-            .unwrap();
         let worker = Worker::start(client, "http://mock.lrclib").unwrap();
         let key = Key {
             track: Track {
@@ -755,7 +748,18 @@ lines:
         server.join().unwrap();
     }
 
-    fn respond(listener: &UnixListener, path: &str, payload: &str) {
+    fn mock_client() -> (Client, TcpListener) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = Client::builder()
+            .no_proxy()
+            .resolve("mock.lrclib", listener.local_addr().unwrap())
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        (client, listener)
+    }
+
+    fn respond(listener: &TcpListener, path: &str, payload: &str) {
         let (stream, _) = listener.accept().unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -780,9 +784,7 @@ lines:
 
     #[test]
     fn lrclib_get_uses_the_complete_track_signature_and_caches_it() {
-        let directory = tempfile::tempdir().unwrap();
-        let socket = directory.path().join("lrclib.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
+        let (client, listener) = mock_client();
         let server = thread::spawn(move || {
             let payload = r#"{"instrumental":false,"plainLyrics":"First\nSecond","syncedLyrics":"[00:01.25]First\n[00:02.50]Second"}"#;
             respond(
@@ -791,11 +793,6 @@ lines:
                 payload,
             );
         });
-        let client = Client::builder()
-            .unix_socket(socket)
-            .timeout(Duration::from_secs(2))
-            .build()
-            .unwrap();
         let worker = Worker::start(client, "http://mock.lrclib").unwrap();
         let key = Key {
             track: Track {

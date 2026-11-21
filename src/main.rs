@@ -16,17 +16,19 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use receiver::{LogEvent, Receiver};
+#[cfg(unix)]
 use signal_hook::{
     consts::signal::{SIGHUP, SIGINT, SIGTERM},
     flag,
 };
 use state::{Player, PresenceStatus};
+#[cfg(unix)]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::{
     path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
     time::{Duration, Instant},
 };
 use terminal::PlayerTerminal;
@@ -72,10 +74,14 @@ fn application_id(value: &str) -> Result<String, &'static str> {
 
 fn main() -> Result<()> {
     let options = Options::parse();
-    let stop = Arc::new(AtomicBool::new(false));
-    for signal in [SIGINT, SIGTERM, SIGHUP] {
-        flag::register(signal, stop.clone())?;
-    }
+    #[cfg(unix)]
+    let stop = {
+        let stop = Arc::new(AtomicBool::new(false));
+        for signal in [SIGINT, SIGTERM, SIGHUP] {
+            flag::register(signal, stop.clone())?;
+        }
+        stop
+    };
     let mut terminal = PlayerTerminal::open()?;
     let mut receiver = Receiver::spawn(&options.uxplay, &options.name)?;
     let dacp = dacp::Worker::spawn()?;
@@ -90,7 +96,11 @@ fn main() -> Result<()> {
     let mut session = Session::default();
     session.player.lyrics_disabled = options.no_online_lyrics;
     let mut sharing = Sharing::default();
-    while !stop.load(Ordering::Relaxed) {
+    loop {
+        #[cfg(unix)]
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         session.poll_receiver(&mut receiver, &dacp, Instant::now())?;
         let now = Instant::now();
         let visualizing = session.player.visualizer.is_some();
@@ -298,7 +308,7 @@ impl Sharing {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{fs, os::unix::fs::PermissionsExt, thread};

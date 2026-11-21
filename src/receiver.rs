@@ -1,15 +1,22 @@
 use crate::{dacp::Credentials, spectrum, state::Track};
 use anyhow::{Context, Result};
 use image::{DynamicImage, ImageFormat, ImageReader, Limits};
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+#[cfg(unix)]
 use std::{
-    fs::{File, Metadata, Permissions},
-    io::{self, BufRead, BufReader, Cursor, Read},
+    fs::Permissions,
     os::unix::fs::{MetadataExt, PermissionsExt},
+    time::Duration,
+};
+use std::{
+    fs::{File, Metadata},
+    io::{self, BufRead, BufReader, Cursor, Read},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus},
     sync::mpsc::{self, Receiver as Inbox, Sender},
     thread,
-    time::{Duration, Instant, SystemTime},
+    time::{Instant, SystemTime},
 };
 use tempfile::TempDir;
 
@@ -25,10 +32,14 @@ pub struct Receiver {
 
 impl Receiver {
     pub fn spawn(executable: &Path, name: &str) -> Result<Self> {
-        let directory = tempfile::Builder::new()
-            .prefix("t-ui-uxplay-")
-            .permissions(Permissions::from_mode(0o700))
-            .tempdir()?;
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("t-ui-uxplay-");
+        #[cfg(unix)]
+        builder.permissions(Permissions::from_mode(0o700));
+        let directory = builder.tempdir()?;
+        // Supplying an empty file keeps user UxPlay defaults from overriding this session.
+        let config = directory.path().join("uxplayrc");
+        File::create(&config)?;
         let exports = Exports::new(directory.path());
         let (reader, writer) = io::pipe()?;
         let (pcm, audio) = io::pipe()?;
@@ -42,10 +53,11 @@ impl Receiver {
              visualizer. ! queue ! autoaudiosink",
             spectrum::SAMPLE_RATE,
         );
-        let mut child = Command::new("stdbuf")
-            .args(["-oL", "-eL", "--"])
-            .arg(executable)
-            .args(["-rc", "/dev/null", "-n", name, "-nh", "-vs", "0", "-d", "1"])
+        let mut command = receiver_command(executable);
+        let mut child = command
+            .arg("-rc")
+            .arg(&config)
+            .args(["-n", name, "-nh", "-vs", "0", "-d", "1"])
             .arg("-md")
             .arg(&exports.metadata.path)
             .arg("-ca")
@@ -58,7 +70,13 @@ impl Receiver {
             .stdout(writer.try_clone()?)
             .stderr(writer)
             .spawn()
-            .with_context(|| format!("Could not start {} via stdbuf", executable.display()))?;
+            .with_context(|| {
+                format!(
+                    "Could not start {} using {}",
+                    executable.display(),
+                    command.get_program().to_string_lossy()
+                )
+            })?;
 
         let (send, logs) = mpsc::channel();
         let result = thread::Builder::new()
@@ -85,17 +103,36 @@ impl Receiver {
     }
 }
 
+#[cfg(unix)]
+fn receiver_command(executable: &Path) -> Command {
+    #[cfg(target_os = "macos")]
+    let program = "gstdbuf";
+    #[cfg(not(target_os = "macos"))]
+    let program = "stdbuf";
+    let mut command = Command::new(program);
+    command.args(["-oL", "-eL", "--"]).arg(executable);
+    command
+}
+
+#[cfg(windows)]
+fn receiver_command(executable: &Path) -> Command {
+    Command::new(executable)
+}
+
 impl Drop for Receiver {
     fn drop(&mut self) {
         if matches!(self.child.try_wait(), Ok(None)) {
-            // The process is still our child and remains unreaped until try_wait or wait.
-            unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM) };
-            let deadline = Instant::now() + Duration::from_millis(600);
-            while Instant::now() < deadline {
-                if !matches!(self.child.try_wait(), Ok(None)) {
-                    return;
+            #[cfg(unix)]
+            {
+                // The child remains unreaped until try_wait or wait.
+                unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM) };
+                let deadline = Instant::now() + Duration::from_millis(600);
+                while Instant::now() < deadline {
+                    if !matches!(self.child.try_wait(), Ok(None)) {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(20));
                 }
-                thread::sleep(Duration::from_millis(20));
             }
             let _ = self.child.kill();
         }
@@ -283,19 +320,33 @@ impl Exports {
 
 #[derive(PartialEq, Eq)]
 struct FileStamp {
-    inode: u64,
     size: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
     modified: (i64, i64),
+    #[cfg(unix)]
     changed: (i64, i64),
+    #[cfg(windows)]
+    created: u64,
+    #[cfg(windows)]
+    last_write: u64,
 }
 
 impl From<Metadata> for FileStamp {
     fn from(metadata: Metadata) -> Self {
         Self {
-            inode: metadata.ino(),
             size: metadata.len(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+            #[cfg(unix)]
             modified: (metadata.mtime(), metadata.mtime_nsec()),
+            #[cfg(unix)]
             changed: (metadata.ctime(), metadata.ctime_nsec()),
+            #[cfg(windows)]
+            created: metadata.creation_time(),
+            #[cfg(windows)]
+            last_write: metadata.last_write_time(),
         }
     }
 }
@@ -344,6 +395,7 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[cfg(unix)]
     #[test]
     fn receiver_export_directory_is_owner_only_and_removed_on_drop() {
         let receiver = Receiver::spawn(Path::new("/usr/bin/true"), "Test").unwrap();

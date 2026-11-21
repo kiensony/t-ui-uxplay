@@ -1,14 +1,22 @@
+#[cfg(windows)]
+use self::windows::Pipe as Stream;
 use crate::state::{PresenceStatus, Timing, Track, format_time};
 use serde_json::{Value, json};
+#[cfg(unix)]
 use std::{
     env,
+    os::{fd::AsRawFd, unix::net::UnixStream as Stream},
+};
+use std::{
     io::{self, Read, Write},
-    os::{fd::AsRawFd, unix::net::UnixStream},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
     thread::{self, JoinHandle},
     time::{Duration, Instant, UNIX_EPOCH},
 };
+
+#[cfg(windows)]
+mod windows;
 
 const RETRY: Duration = Duration::from_secs(2);
 const TICK: Duration = Duration::from_millis(250);
@@ -148,6 +156,7 @@ fn clear(connection: &mut Option<Ipc>, published: &mut Option<Listening>) {
     }
 }
 
+#[cfg(unix)]
 fn socket_paths() -> Vec<PathBuf> {
     let mut directories = Vec::new();
     for key in ["XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"] {
@@ -172,6 +181,13 @@ fn socket_paths() -> Vec<PathBuf> {
             .into_iter()
             .flat_map(|path| (0..10).map(move |index| path.join(format!("discord-ipc-{index}"))))
         })
+        .collect()
+}
+
+#[cfg(windows)]
+fn socket_paths() -> Vec<PathBuf> {
+    (0..10)
+        .map(|index| PathBuf::from(format!(r"\\.\pipe\discord-ipc-{index}")))
         .collect()
 }
 
@@ -250,15 +266,18 @@ impl Listening {
 }
 
 struct Ipc {
-    stream: UnixStream,
+    stream: Stream,
     nonce: u64,
 }
 
 impl Ipc {
     fn connect(path: &Path, client_id: &str) -> io::Result<Self> {
-        let stream = UnixStream::connect(path)?;
-        stream.set_read_timeout(Some(IO_TIMEOUT))?;
-        stream.set_write_timeout(Some(IO_TIMEOUT))?;
+        let stream = Stream::connect(path)?;
+        #[cfg(unix)]
+        {
+            stream.set_read_timeout(Some(IO_TIMEOUT))?;
+            stream.set_write_timeout(Some(IO_TIMEOUT))?;
+        }
         let mut ipc = Self { stream, nonce: 0 };
         ipc.send_json(HANDSHAKE, &json!({ "v": 1, "client_id": client_id }))?;
         ipc.wait_for(|data| data["cmd"] == "DISPATCH" && data["evt"] == "READY")?;
@@ -283,6 +302,7 @@ impl Ipc {
         write_frame(&mut self.stream, opcode, &serde_json::to_vec(data)?)
     }
 
+    #[cfg(unix)]
     fn poll(&mut self) -> io::Result<()> {
         let mut poll = libc::pollfd {
             fd: self.stream.as_raw_fd(),
@@ -295,6 +315,14 @@ impl Ipc {
             0 => Ok(()),
             _ => self.receive().map(|_| ()),
         }
+    }
+
+    #[cfg(windows)]
+    fn poll(&mut self) -> io::Result<()> {
+        if self.stream.has_data()? {
+            self.receive()?;
+        }
+        Ok(())
     }
 
     fn wait_for(&mut self, matches: impl Fn(&Value) -> bool) -> io::Result<()> {
@@ -335,7 +363,7 @@ impl Ipc {
     }
 }
 
-fn read_frame(stream: &mut UnixStream) -> io::Result<(u32, Vec<u8>)> {
+fn read_frame(stream: &mut impl Read) -> io::Result<(u32, Vec<u8>)> {
     let mut header = [0; 8];
     stream.read_exact(&mut header)?;
     let opcode = u32::from_le_bytes(header[..4].try_into().unwrap());
@@ -351,16 +379,19 @@ fn read_frame(stream: &mut UnixStream) -> io::Result<(u32, Vec<u8>)> {
     Ok((opcode, data))
 }
 
-fn write_frame(stream: &mut UnixStream, opcode: u32, data: &[u8]) -> io::Result<()> {
+fn write_frame(stream: &mut impl Write, opcode: u32, data: &[u8]) -> io::Result<()> {
     stream.write_all(&opcode.to_le_bytes())?;
     stream.write_all(&(data.len() as u32).to_le_bytes())?;
     stream.write_all(data)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::{io::ErrorKind, os::unix::net::UnixListener};
+    use std::{
+        io::ErrorKind,
+        os::unix::net::{UnixListener, UnixStream},
+    };
 
     #[test]
     fn reconnects_and_clears_on_disconnect_toggle_and_shutdown() {
