@@ -1110,11 +1110,12 @@ fn palette_selection_previews_the_player_colors() {
 
     let original = header_color(store.saved.palette, None);
     assert_eq!(original, Color::Rgb(133, 232, 188));
-    dialog.edit(Input::Activate(Field::Palette));
-    let pink = Color::Rgb(245, 169, 184);
-    assert_eq!(header_color(store.saved.palette, Some(&dialog)), pink);
-    assert_eq!(header_color(store.saved.palette, None), original);
-    assert_eq!(header_color(dialog.draft.palette, None), pink);
+    for accent in [Color::Rgb(245, 169, 184), Color::Rgb(91, 206, 250)] {
+        dialog.edit(Input::Activate(Field::Palette));
+        assert_eq!(header_color(store.saved.palette, Some(&dialog)), accent);
+        assert_eq!(header_color(store.saved.palette, None), original);
+        assert_eq!(header_color(dialog.draft.palette, None), accent);
+    }
 }
 
 #[cfg(test)]

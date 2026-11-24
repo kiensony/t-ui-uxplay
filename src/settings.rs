@@ -51,21 +51,25 @@ impl View {
 pub enum Palette {
     #[default]
     Default,
-    FemboyTransgirl,
+    #[serde(alias = "femboy_transgirl")]
+    Femboy,
+    Transgirl,
 }
 
 impl Palette {
     pub fn label(self) -> &'static str {
         match self {
             Self::Default => "Default",
-            Self::FemboyTransgirl => "Femboy / Transgirl",
+            Self::Femboy => "Femboy",
+            Self::Transgirl => "Transgirl",
         }
     }
 
     fn next(self) -> Self {
         match self {
-            Self::Default => Self::FemboyTransgirl,
-            Self::FemboyTransgirl => Self::Default,
+            Self::Default => Self::Femboy,
+            Self::Femboy => Self::Transgirl,
+            Self::Transgirl => Self::Default,
         }
     }
 }
@@ -483,26 +487,39 @@ mod tests {
         )
         .unwrap();
         let mut store = Store::open(Ok(path.clone()), Overrides::default());
-        for (initial, next) in [
-            (Palette::Default, Palette::FemboyTransgirl),
-            (Palette::FemboyTransgirl, Palette::Default),
+        assert_eq!(store.saved.palette, Palette::Default);
+        for (label, key) in [
+            ("Femboy", "femboy"),
+            ("Transgirl", "transgirl"),
+            ("Default", "default"),
         ] {
             assert!(store.error.is_none());
-            assert_eq!(store.saved.palette, initial);
             let mut dialog = Dialog::new(&store);
             for _ in 0..3 {
                 dialog.edit(Input::Tab(false));
             }
             dialog.edit(Input::Enter);
-            assert_eq!(dialog.draft.palette, next);
-            assert_eq!(store.saved.palette, initial);
+            assert_eq!(dialog.draft.palette.label(), label);
+            assert_ne!(dialog.draft.palette, store.saved.palette);
             store.save(dialog.draft).unwrap();
+            let json: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(json["palette"], key);
             store = Store::open(Ok(path.clone()), Overrides::default());
-            assert_eq!(store.saved.palette, next);
+            assert_eq!(store.saved.palette.label(), label);
             assert_eq!(store.name(), "Home");
             assert_eq!(store.saved.view, View::Ribbons);
             assert!(!store.online_lyrics());
         }
+    }
+
+    #[test]
+    fn legacy_combined_palette_loads_the_pink_preset() {
+        let settings: Settings = serde_json::from_str(
+            r#"{"name":"Home","online_lyrics":false,"view":"ribbons","palette":"femboy_transgirl"}"#,
+        ).unwrap();
+        assert_eq!(settings.palette.label(), "Femboy");
+        assert_eq!(serde_json::to_value(settings).unwrap()["palette"], "femboy");
     }
 
     #[test]
