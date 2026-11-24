@@ -27,8 +27,8 @@ fn now_playing_cycles_through_cover_ribbons_and_spectrum() {
 
     for (width, height, palette, bass_color) in [
         (100, 30, Palette::Default, Color::Rgb(89, 241, 130)),
-        (48, 25, Palette::Femboy, Color::Rgb(215, 113, 170)),
-        (100, 30, Palette::Transgirl, Color::Rgb(91, 206, 250)),
+        (48, 25, Palette::Femboy, Color::Rgb(172, 218, 245)),
+        (100, 30, Palette::Transgirl, Color::Rgb(92, 141, 221)),
     ] {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         player.cycle_visualizer();

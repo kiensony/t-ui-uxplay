@@ -81,7 +81,7 @@ The Ribbons preset uses the live AirPlay audio to rotate and warp neon trails. S
 
 Click **Settings** or press `s`. Use `Tab` and `Shift+Tab` to move between fields, `Enter` to activate a field, and `Esc` to discard the draft. Enter a speaker name of up to 50 UTF-8 bytes. Choose **Save** to apply your changes. A rename restarts AirPlay and asks for confirmation if a sender is connected. Then reconnect using the new name.
 
-**Color palette** starts on **Default**. Click the field or press `Enter` to cycle through **Femboy** (pink), **Transgirl** (light blue), and **Default**. The player and visualizers preview each choice. Choose **Save** to use it in future sessions.
+**Color palette** starts on **Default**. Click the field or press `Enter` to cycle through **Femboy** (soft pink and light blue), **Transgirl** (deep pink and royal blue), and **Default**. The player and visualizers preview each choice. Choose **Save** to use it in future sessions.
 
 **Online lyrics** starts On and **Default view** starts on Cover. Settings are stored in `t-ui-uxplay/settings.json` under `$XDG_CONFIG_HOME` (or `~/.config`) on Linux, `~/Library/Application Support` on macOS, and `%APPDATA%` on Windows. `--name`, `--no-online-lyrics`, and `--discord-app-id` override and lock their corresponding fields for that launch.
 

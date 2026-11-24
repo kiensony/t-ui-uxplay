@@ -1097,24 +1097,33 @@ fn palette_selection_previews_the_player_colors() {
     let now = Instant::now();
     let player = Player::default();
     let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
-    let mut header_color = |palette, dialog: Option<&Dialog>| {
+    let mut player_colors = |palette, dialog: Option<&Dialog>| {
         terminal
             .draw(|frame| {
                 draw(frame, &player, "Home", false, now, dialog, palette);
             })
             .unwrap();
-        let header = &terminal.backend().buffer()[(1, 0)];
+        let buffer = terminal.backend().buffer();
+        let header = &buffer[(1, 0)];
+        let hint = &buffer[(1, 31)];
         assert_eq!(header.symbol(), "A");
-        header.fg
+        assert_eq!(hint.symbol(), "p");
+        (header.fg, hint.fg)
     };
 
-    let original = header_color(store.saved.palette, None);
-    assert_eq!(original, Color::Rgb(133, 232, 188));
-    for accent in [Color::Rgb(245, 169, 184), Color::Rgb(91, 206, 250)] {
+    let original = player_colors(store.saved.palette, None);
+    assert_eq!(
+        original,
+        (Color::Rgb(133, 232, 188), Color::Rgb(157, 177, 182))
+    );
+    for pair in [
+        (Color::Rgb(246, 187, 212), Color::Rgb(172, 218, 245)),
+        (Color::Rgb(92, 141, 221), Color::Rgb(220, 88, 145)),
+    ] {
         dialog.edit(Input::Activate(Field::Palette));
-        assert_eq!(header_color(store.saved.palette, Some(&dialog)), accent);
-        assert_eq!(header_color(store.saved.palette, None), original);
-        assert_eq!(header_color(dialog.draft.palette, None), accent);
+        assert_eq!(player_colors(store.saved.palette, Some(&dialog)), pair);
+        assert_eq!(player_colors(store.saved.palette, None), original);
+        assert_eq!(player_colors(dialog.draft.palette, None), pair);
     }
 }
 
