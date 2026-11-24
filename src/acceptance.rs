@@ -335,6 +335,7 @@ fn discord_activity_contains_song_artist_and_listening_type() {
     assert_eq!(activity["status_display_type"], 2);
     assert_eq!(activity["details"], "One");
     assert_eq!(activity["state"], "Miles Davis");
+    assert!(activity.get("timestamps").is_none());
 }
 
 #[test]
@@ -354,8 +355,8 @@ fn discord_progress_reanchors_after_seeks_and_holds_when_playback_stalls() {
         .payload()
     };
     let timestamps = |offset_ms: u64, elapsed: u64| {
-        let start_ms = epoch_seconds * 1000 + offset_ms - elapsed * 1000;
-        serde_json::json!({ "start": start_ms, "end": start_ms + 210_000 })
+        let start_seconds = epoch_seconds + offset_ms / 1000 - elapsed;
+        serde_json::json!({ "start": start_seconds, "end": start_seconds + 210 })
     };
     let sample = |player: &mut state::Player, offset_ms: u64, position| {
         let offset = Duration::from_millis(offset_ms);
@@ -395,6 +396,7 @@ fn discord_progress_reanchors_after_seeks_and_holds_when_playback_stalls() {
     player.set_track(Some(track("Two")), start + Duration::from_secs(7));
     let changed = payload(&player, Duration::from_secs(7));
     assert_eq!(changed["name"], "Two");
+    assert_eq!(changed["state"], "Miles Davis");
     assert!(changed.get("timestamps").is_none());
 }
 

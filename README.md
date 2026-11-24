@@ -81,7 +81,7 @@ The Ribbons preset uses the live AirPlay audio to rotate and warp neon trails. S
 
 Click **Settings** or press `s`. Use `Tab` and `Shift+Tab` to move between fields, `Enter` to activate a field, and `Esc` to discard the draft. Enter a speaker name of up to 50 UTF-8 bytes. Choose **Save** to apply your changes. A rename restarts AirPlay and asks for confirmation if a sender is connected. Then reconnect using the new name.
 
-**Online lyrics** starts On and **Default view** starts on Cover. Settings are stored in `t-ui-uxplay/settings.json` under `$XDG_CONFIG_HOME` (or `~/.config`) on Linux, `~/Library/Application Support` on macOS, and `%APPDATA%` on Windows. `--name` and `--no-online-lyrics` override and lock the corresponding field for that launch.
+**Online lyrics** starts On and **Default view** starts on Cover. Settings are stored in `t-ui-uxplay/settings.json` under `$XDG_CONFIG_HOME` (or `~/.config`) on Linux, `~/Library/Application Support` on macOS, and `%APPDATA%` on Windows. `--name`, `--no-online-lyrics`, and `--discord-app-id` override and lock their corresponding fields for that launch.
 
 LRCLIB lookups send the title, artist, album, and available duration. If the first result has line timings, the player also checks for word timings on a release with the same song, artist, and a similar duration. Results are cached until the player quits. Turn **Online lyrics** off to clear the panel and stop lookups.
 
@@ -89,7 +89,9 @@ The lyrics panel shows **Word sync** when the words can light up progressively a
 
 ## Discord Rich Presence
 
-Create an application in the [Discord Developer Portal](https://discord.com/developers/applications) and copy its **Application ID**. Start the signed-in Discord desktop app on the same computer. Pass the application ID when starting the receiver.
+Create an application in the Discord Developer Portal and copy its **Application ID**. In the receiver, open **Settings** with `s`, enter the ID in **Discord Application ID**, and choose **Save**. If sharing is active, the receiver switches to the new Discord application. Clear the field and save to remove the saved ID. Start the signed-in Discord desktop app on the same computer. [Discord Developer Portal](https://discord.com/developers/applications)
+
+To override the saved ID for one launch, pass it on the command line.
 
 ```sh
 t-ui-uxplay --discord-app-id YOUR_APPLICATION_ID
@@ -97,7 +99,7 @@ t-ui-uxplay --discord-app-id YOUR_APPLICATION_ID
 
 Sharing starts **Off** each launch. Click **Discord** or press `d` to enable it. **Sharing** means Discord IPC is connected. While a track is available, the activity is **Listening** and includes the title and artist. **Unavailable** means the app could not publish or reach Discord, or no application ID was configured. The player retries IPC while enabled. It clears the activity when sharing is turned off, the sender disconnects, or the player quits.
 
-Discord uses the song title in **Listening to**. When AirPlay sends track timing, the activity card shows a progress bar that updates after a seek. After three seconds without progress, the card shows the last elapsed time and track length as text until playback advances again.
+Discord uses the song title in **Listening to**. When AirPlay sends track timing, the activity card shows a live progress bar with elapsed time and total track length, such as `1:20 / 3:30`. The bar updates after a seek. After three seconds without progress, the card shows the last reported time as text until playback advances again. If AirPlay provides no timing for the track, the card shows the song and artist.
 
 ## Verify
 
@@ -107,7 +109,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Before release, stream Apple Music from an iPhone on the same network. On Linux, macOS, and Windows, rename the speaker from Settings, reconnect under the new name, and use Previous, Play/Pause, and Next. Verify audio playback, track changes, artwork, pause and seek alignment, and cleanup when the sender disconnects. Check artwork in a Kitty graphics terminal and a fallback terminal. With your actual Discord application ID, verify that the Listening activity appears, updates with the track, and clears on disconnect, toggle off, and quit.
+Before release, stream Apple Music from an iPhone on the same network. On Linux, macOS, and Windows, rename the speaker from Settings, reconnect under the new name, and use Previous, Play/Pause, and Next. Verify audio playback, track changes, artwork, pause and seek alignment, and cleanup when the sender disconnects. Check artwork in a Kitty graphics terminal and a fallback terminal.
+
+With a Discord application ID configured, view the Listening activity from another Discord account. Verify the song title, live progress bar, and elapsed and total times. Seek in both directions, pause for at least three seconds, resume, and switch tracks. Verify the activity clears when sharing is turned off, the sender disconnects, and the receiver quits.
 
 ## GitHub Actions
 

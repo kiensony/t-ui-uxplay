@@ -1,4 +1,4 @@
-use crate::{receiver_name, state::Visualizer};
+use crate::{application_id, receiver_name, state::Visualizer};
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
@@ -51,6 +51,8 @@ pub struct Settings {
     pub name: String,
     pub online_lyrics: bool,
     pub view: View,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord_app_id: Option<String>,
 }
 
 impl Default for Settings {
@@ -59,6 +61,7 @@ impl Default for Settings {
             name: "t-ui-uxplay".into(),
             online_lyrics: true,
             view: View::Cover,
+            discord_app_id: None,
         }
     }
 }
@@ -66,6 +69,14 @@ impl Default for Settings {
 impl Settings {
     pub fn validated(mut self) -> Result<Self> {
         self.name = receiver_name(&self.name).map_err(anyhow::Error::msg)?;
+        self.discord_app_id = self
+            .discord_app_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(application_id)
+            .transpose()
+            .map_err(anyhow::Error::msg)?;
         Ok(self)
     }
 }
@@ -74,6 +85,7 @@ impl Settings {
 pub struct Overrides {
     pub name: Option<String>,
     pub no_online_lyrics: bool,
+    pub discord_app_id: Option<String>,
 }
 
 impl Overrides {
@@ -83,6 +95,12 @@ impl Overrides {
 
     fn online_lyrics(&self, settings: &Settings) -> bool {
         !self.no_online_lyrics && settings.online_lyrics
+    }
+
+    fn discord_app_id<'a>(&'a self, settings: &'a Settings) -> Option<&'a str> {
+        self.discord_app_id
+            .as_deref()
+            .or(settings.discord_app_id.as_deref())
     }
 }
 
@@ -138,6 +156,10 @@ impl Store {
 
     pub fn online_lyrics_for(&self, settings: &Settings) -> bool {
         self.overrides.online_lyrics(settings)
+    }
+
+    pub fn discord_app_id(&self) -> Option<&str> {
+        self.overrides.discord_app_id(&self.saved)
     }
 
     pub fn save(&mut self, draft: Settings) -> Result<()> {
@@ -203,6 +225,7 @@ pub enum Field {
     Name,
     Lyrics,
     View,
+    DiscordAppId,
     Save,
 }
 
@@ -237,7 +260,7 @@ pub struct Dialog {
     pub focus: Field,
     pub mode: Mode,
     pub error: Option<String>,
-    pub name_selected: bool,
+    pub text_selected: bool,
     overrides: Overrides,
 }
 
@@ -248,7 +271,7 @@ impl Dialog {
             focus: Field::Name,
             mode: Mode::Edit,
             error: store.error.clone(),
-            name_selected: true,
+            text_selected: true,
             overrides: store.overrides.clone(),
         };
         let focus = dialog.fields().next().unwrap_or(Field::Save);
@@ -264,18 +287,29 @@ impl Dialog {
         self.overrides.online_lyrics(&self.draft)
     }
 
+    pub fn discord_app_id(&self) -> Option<&str> {
+        self.overrides.discord_app_id(&self.draft)
+    }
+
     pub fn locked(&self, field: Field) -> bool {
         match field {
             Field::Name => self.overrides.name.is_some(),
             Field::Lyrics => self.overrides.no_online_lyrics,
+            Field::DiscordAppId => self.overrides.discord_app_id.is_some(),
             Field::View | Field::Save => false,
         }
     }
 
     fn fields(&self) -> impl Iterator<Item = Field> + '_ {
-        [Field::Name, Field::Lyrics, Field::View, Field::Save]
-            .into_iter()
-            .filter(|&field| !self.locked(field))
+        [
+            Field::Name,
+            Field::Lyrics,
+            Field::View,
+            Field::DiscordAppId,
+            Field::Save,
+        ]
+        .into_iter()
+        .filter(|&field| !self.locked(field))
     }
 
     pub fn key(key: KeyEvent) -> Option<Input> {
@@ -330,20 +364,23 @@ impl Dialog {
                             .unwrap_or(0);
                         let offset = if back { fields.len() - 1 } else { 1 };
                         self.focus = fields[(index + offset) % fields.len()];
-                        self.name_selected = self.focus == Field::Name;
+                        self.text_selected = true;
                     }
                     Input::Enter => return self.activate(self.focus),
                     Input::Activate(field) => return self.activate(field),
-                    Input::Character(c) if !c.is_control() => self.insert_name(&c.to_string()),
-                    Input::Backspace if self.focus == Field::Name => {
-                        if self.name_selected {
-                            self.draft.name.clear();
-                        } else if let Some((index, _)) =
-                            self.draft.name.grapheme_indices(true).next_back()
-                        {
-                            self.draft.name.truncate(index);
+                    Input::Character(c) if !c.is_control() => self.insert_text(&c.to_string()),
+                    Input::Backspace => {
+                        let selected = self.text_selected;
+                        if let Some(value) = self.text_draft() {
+                            if selected {
+                                value.clear();
+                            } else if let Some((index, _)) =
+                                value.grapheme_indices(true).next_back()
+                            {
+                                value.truncate(index);
+                            }
+                            self.text_selected = false;
                         }
-                        self.name_selected = false;
                     }
                     _ => {}
                 }
@@ -352,18 +389,38 @@ impl Dialog {
         }
     }
 
-    pub fn insert_name(&mut self, text: &str) {
-        if self.mode != Mode::Edit || self.focus != Field::Name || self.locked(Field::Name) {
+    pub fn insert_text(&mut self, text: &str) {
+        if self.mode != Mode::Edit {
             return;
         }
+        let field = self.focus;
+        let selected = self.text_selected;
+        let Some(value) = self.text_draft() else {
+            return;
+        };
         if text.chars().any(char::is_control) {
-            self.error = Some("Speaker names cannot contain control characters".into());
+            self.error = Some(if field == Field::Name {
+                "Speaker names cannot contain control characters".into()
+            } else {
+                "Use the numeric Discord application ID".into()
+            });
         } else {
-            if self.name_selected {
-                self.draft.name.clear();
-                self.name_selected = false;
+            if selected {
+                value.clear();
             }
-            self.draft.name.push_str(text);
+            value.push_str(text);
+            self.text_selected = false;
+        }
+    }
+
+    fn text_draft(&mut self) -> Option<&mut String> {
+        if self.locked(self.focus) {
+            return None;
+        }
+        match self.focus {
+            Field::Name => Some(&mut self.draft.name),
+            Field::DiscordAppId => Some(self.draft.discord_app_id.get_or_insert_default()),
+            _ => None,
         }
     }
 
@@ -373,7 +430,7 @@ impl Dialog {
         }
         self.focus = field;
         match field {
-            Field::Name => self.name_selected = true,
+            Field::Name | Field::DiscordAppId => self.text_selected = true,
             Field::Lyrics => self.draft.online_lyrics = !self.draft.online_lyrics,
             Field::View => self.draft.view = self.draft.view.next(),
             Field::Save => return Some(Intent::Save),
@@ -387,6 +444,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn discord_application_id_can_be_edited_saved_and_cleared() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"name":"Home","online_lyrics":true,"view":"cover"}"#,
+        )
+        .unwrap();
+        let mut store = Store::open(Ok(path.clone()), Overrides::default());
+        assert!(store.error.is_none());
+        assert_eq!(store.discord_app_id(), None);
+
+        let mut dialog = Dialog::new(&store);
+        dialog.edit(Input::Activate(Field::DiscordAppId));
+        dialog.insert_text(" 12345 ");
+        store.save(dialog.draft).unwrap();
+        let mut store = Store::open(Ok(path.clone()), Overrides::default());
+        assert_eq!(store.discord_app_id(), Some("12345"));
+
+        let mut dialog = Dialog::new(&store);
+        dialog.edit(Input::Activate(Field::DiscordAppId));
+        dialog.edit(Input::Character('x'));
+        assert!(store.save(dialog.draft).is_err());
+        assert_eq!(store.discord_app_id(), Some("12345"));
+
+        let mut dialog = Dialog::new(&store);
+        dialog.edit(Input::Activate(Field::DiscordAppId));
+        dialog.edit(Input::Backspace);
+        store.save(dialog.draft).unwrap();
+        let store = Store::open(Ok(path), Overrides::default());
+        assert_eq!(store.discord_app_id(), None);
+    }
+
+    #[test]
     fn settings_survive_reload_and_launch_overrides_do_not_replace_saved_values() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("t-ui-uxplay/settings.json");
@@ -398,6 +489,7 @@ mod tests {
                 name: "  ห้อง 音楽  ".into(),
                 online_lyrics: true,
                 view: View::Ribbons,
+                discord_app_id: Some("12345".into()),
             })
             .unwrap();
         let mut store = Store::open(
@@ -405,6 +497,7 @@ mod tests {
             Overrides {
                 name: Some("CLI Speaker".into()),
                 no_online_lyrics: true,
+                discord_app_id: Some("67890".into()),
             },
         );
         assert_eq!(store.name(), "CLI Speaker");
@@ -413,7 +506,11 @@ mod tests {
         assert_eq!(dialog.focus, Field::View);
         assert_eq!(dialog.name(), "CLI Speaker");
         assert!(!dialog.online_lyrics());
+        assert!(dialog.locked(Field::DiscordAppId));
+        assert_eq!(dialog.discord_app_id(), Some("67890"));
         dialog.edit(Input::Activate(Field::Lyrics));
+        dialog.edit(Input::Activate(Field::DiscordAppId));
+        dialog.insert_text("11111");
         dialog.edit(Input::Activate(Field::View));
         store.save(dialog.draft).unwrap();
 
@@ -421,6 +518,7 @@ mod tests {
         assert_eq!(store.name(), "ห้อง 音楽");
         assert!(store.online_lyrics());
         assert_eq!(store.saved.view, View::Spectrum);
+        assert_eq!(store.discord_app_id(), Some("12345"));
     }
 
     #[test]

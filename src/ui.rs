@@ -86,7 +86,7 @@ pub struct Screen {
 
 struct SettingsScreen {
     area: Rect,
-    targets: [Option<(Rect, Input)>; 4],
+    targets: [Option<(Rect, Input)>; 5],
 }
 
 impl Screen {
@@ -307,7 +307,7 @@ fn draw_settings(
 ) -> SettingsScreen {
     let mut screen = SettingsScreen {
         area,
-        targets: [None; 4],
+        targets: [None; 5],
     };
     frame.render_widget(Clear, area);
     let content = if area.width >= 12 && area.height >= 8 {
@@ -332,53 +332,42 @@ fn draw_settings(
     let help = u16::from(content.height >= 7);
     match dialog.mode {
         Mode::Edit => {
-            let [name, lyrics, view, notice, save, hints] = Layout::vertical([
-                Constraint::Length(2),
+            let text_height = if content.height >= 9 { 2 } else { 1 };
+            let [name, lyrics, view, discord, notice, save, hints] = Layout::vertical([
+                Constraint::Length(text_height),
                 Constraint::Length(1),
                 Constraint::Length(1),
+                Constraint::Length(text_height),
                 Constraint::Fill(1),
                 Constraint::Length(1),
                 Constraint::Length(help),
             ])
             .areas(content);
-            let [name_label, input] = Layout::vertical([Constraint::Length(1); 2]).areas(name);
-            let locked = dialog.locked(Field::Name);
-            let label = if locked {
-                "Speaker name (--name)"
-            } else {
-                "Speaker name"
-            };
-            frame.render_widget(
-                Paragraph::new(label).style(Style::new().fg(MUTED)),
-                name_label,
+            draw_settings_text_field(
+                frame,
+                dialog,
+                name,
+                Field::Name,
+                if dialog.locked(Field::Name) {
+                    "Speaker name (--name)"
+                } else {
+                    "Speaker name"
+                },
+                dialog.name(),
             );
-            let selected = dialog.focus == Field::Name && dialog.name_selected;
-            let style = if selected {
-                Style::new().fg(BACKGROUND).bg(ACCENT)
-            } else {
-                option_style(dialog.focus == Field::Name, locked)
-            };
-            let mut value = dialog.name();
-            if dialog.focus == Field::Name && !selected {
-                let mut width = 1;
-                let mut start = value.len();
-                for (index, grapheme) in value.grapheme_indices(true).rev() {
-                    width += grapheme.width();
-                    if width > usize::from(input.width) {
-                        break;
-                    }
-                    start = index;
-                }
-                value = &value[start..];
-            }
-            let cursor = if dialog.focus == Field::Name && !selected {
-                "▏"
-            } else {
-                ""
-            };
-            frame.render_widget(
-                Paragraph::new(format!("{value}{cursor}")).style(style),
-                input,
+            draw_settings_text_field(
+                frame,
+                dialog,
+                discord,
+                Field::DiscordAppId,
+                if dialog.locked(Field::DiscordAppId) {
+                    "Discord ID (--discord-app-id)"
+                } else if text_height == 1 {
+                    "Discord ID"
+                } else {
+                    "Discord Application ID"
+                },
+                dialog.discord_app_id().unwrap_or_default(),
             );
             let lyrics_value = if dialog.online_lyrics() { "On" } else { "Off" };
             let lyrics_label = if dialog.locked(Field::Lyrics) {
@@ -419,6 +408,7 @@ fn draw_settings(
                 (name, Field::Name),
                 (lyrics, Field::Lyrics),
                 (view, Field::View),
+                (discord, Field::DiscordAppId),
                 (save, Field::Save),
             ]
             .map(|(area, field)| (!dialog.locked(field)).then_some((area, Input::Activate(field))));
@@ -481,6 +471,58 @@ fn draw_settings(
         }
     }
     screen
+}
+
+fn draw_settings_text_field(
+    frame: &mut Frame,
+    dialog: &Dialog,
+    area: Rect,
+    field: Field,
+    label: &str,
+    mut value: &str,
+) {
+    let [label_area, input] = if area.height == 1 {
+        Layout::horizontal([
+            Constraint::Length((label.len() as u16 + 1).min(area.width / 2)),
+            Constraint::Fill(1),
+        ])
+        .areas(area)
+    } else {
+        Layout::vertical([Constraint::Length(1); 2]).areas(area)
+    };
+    frame.render_widget(
+        Paragraph::new(label).style(Style::new().fg(MUTED)),
+        label_area,
+    );
+    let focused = dialog.focus == field;
+    let selected = focused && dialog.text_selected;
+    let style = if selected {
+        Style::new().fg(BACKGROUND).bg(ACCENT)
+    } else {
+        option_style(focused, dialog.locked(field))
+    };
+    let cursor = if focused && !selected {
+        let mut width = 1;
+        let mut start = value.len();
+        for (index, grapheme) in value.grapheme_indices(true).rev() {
+            width += grapheme.width();
+            if width > usize::from(input.width) {
+                break;
+            }
+            start = index;
+        }
+        value = &value[start..];
+        "▏"
+    } else {
+        if field == Field::DiscordAppId && value.is_empty() {
+            value = "Not set";
+        }
+        ""
+    };
+    frame.render_widget(
+        Paragraph::new(format!("{value}{cursor}")).style(style),
+        input,
+    );
 }
 
 fn draw_notice(frame: &mut Frame, dialog: &Dialog, unavailable: bool, area: Rect) {
@@ -1046,6 +1088,20 @@ fn settings_dialog_owns_input_and_uses_a_fullscreen_compact_layout() {
         );
         assert!(overlay.cover.is_none());
         assert_eq!(overlay.click(base.buttons[3].x, base.buttons[3].y), None);
+        let (discord, _) = overlay
+            .modal
+            .as_ref()
+            .unwrap()
+            .targets
+            .iter()
+            .flatten()
+            .find(|(_, input)| *input == Input::Activate(Field::DiscordAppId))
+            .unwrap();
+        assert!(!discord.is_empty());
+        assert_eq!(
+            overlay.click(discord.x, discord.y),
+            Some(Action::Settings(Input::Activate(Field::DiscordAppId))),
+        );
         for character in ['p', ' ', 'n'] {
             assert_eq!(
                 overlay.key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),

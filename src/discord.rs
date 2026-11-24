@@ -30,30 +30,30 @@ const PING: u32 = 3;
 const PONG: u32 = 4;
 
 pub struct Worker {
-    desired: Option<Sender<Desired>>,
+    desired: Option<Sender<(u64, Desired)>>,
     pub status: Receiver<(u64, PresenceStatus)>,
     thread: Option<JoinHandle<()>>,
 }
 
-#[derive(Default)]
-struct Desired {
-    revision: u64,
-    enabled: bool,
-    activity: Option<Listening>,
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Desired {
+    pub enabled: bool,
+    pub application_id: Option<String>,
+    pub activity: Option<Listening>,
 }
 
 impl Worker {
-    pub fn spawn(application_id: String) -> io::Result<Self> {
-        Self::start(application_id, socket_paths())
+    pub fn spawn() -> io::Result<Self> {
+        Self::start(socket_paths())
     }
 
-    fn start(application_id: String, paths: Vec<PathBuf>) -> io::Result<Self> {
+    fn start(paths: Vec<PathBuf>) -> io::Result<Self> {
         let (desired, inbox) = mpsc::channel();
         let (statuses, status) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("discord-ipc".into())
             .spawn(move || {
-                run(&application_id, &paths, inbox, statuses);
+                run(&paths, inbox, statuses);
             })?;
         Ok(Self {
             desired: Some(desired),
@@ -62,13 +62,9 @@ impl Worker {
         })
     }
 
-    pub fn update(&self, revision: u64, enabled: bool, activity: Option<Listening>) {
+    pub fn update(&self, revision: u64, desired: Desired) {
         if let Some(sender) = &self.desired {
-            let _ = sender.send(Desired {
-                revision,
-                enabled,
-                activity,
-            });
+            let _ = sender.send((revision, desired));
         }
     }
 }
@@ -82,13 +78,9 @@ impl Drop for Worker {
     }
 }
 
-fn run(
-    id: &str,
-    paths: &[PathBuf],
-    inbox: Receiver<Desired>,
-    report: Sender<(u64, PresenceStatus)>,
-) {
+fn run(paths: &[PathBuf], inbox: Receiver<(u64, Desired)>, report: Sender<(u64, PresenceStatus)>) {
     let mut desired = Desired::default();
+    let mut revision = 0;
     let mut last_status = None;
     let mut connection: Option<Ipc> = None;
     let mut published = None;
@@ -97,11 +89,16 @@ fn run(
     loop {
         match inbox.recv_timeout(TICK) {
             Ok(update) => {
-                let update = inbox.try_iter().last().unwrap_or(update);
-                if !desired.enabled && update.enabled {
+                let (next_revision, update) = inbox.try_iter().last().unwrap_or(update);
+                let id_changed = desired.application_id != update.application_id;
+                if id_changed {
+                    clear(&mut connection, &mut published);
+                }
+                if id_changed || (!desired.enabled && update.enabled) {
                     next_retry = Instant::now();
                 }
                 desired = update;
+                revision = next_revision;
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -110,7 +107,7 @@ fn run(
         let status = if !desired.enabled {
             clear(&mut connection, &mut published);
             PresenceStatus::Off
-        } else {
+        } else if let Some(id) = &desired.application_id {
             if connection.is_none() && Instant::now() >= next_retry {
                 connection = paths.iter().find_map(|path| Ipc::connect(path, id).ok());
                 next_retry = Instant::now() + RETRY;
@@ -135,9 +132,11 @@ fn run(
             } else {
                 PresenceStatus::Unavailable
             }
+        } else {
+            PresenceStatus::Unavailable
         };
 
-        let update = (desired.revision, status);
+        let update = (revision, status);
         if last_status != Some(update) {
             if report.send(update).is_err() {
                 break;
@@ -206,12 +205,13 @@ enum Progress {
 impl Listening {
     pub fn new(track: &Track, timing: Option<Timing>, now: Instant) -> Self {
         let progress = timing.map(|timing| {
+            // Discord's local SET_ACTIVITY request uses Unix seconds.
             if timing.is_advancing(now)
                 && let Some(start) = timing
                     .started_at
                     .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                    .and_then(|epoch| u64::try_from(epoch.as_millis()).ok())
-                && let Some(end) = start.checked_add(u64::from(timing.duration) * 1000)
+                    .map(|elapsed| elapsed.as_secs())
+                && let Some(end) = start.checked_add(u64::from(timing.duration))
             {
                 Progress::Advancing { start, end }
             } else {
@@ -397,7 +397,19 @@ mod tests {
     fn reconnects_and_clears_on_disconnect_toggle_and_shutdown() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("discord-ipc-0");
-        let worker = Worker::start("12345".into(), vec![path.clone()]).unwrap();
+        let worker = Worker::start(vec![path.clone()]).unwrap();
+        let update = |revision, enabled, id: Option<&str>, activity| {
+            worker.update(
+                revision,
+                Desired {
+                    enabled,
+                    application_id: id.map(str::to_owned),
+                    activity,
+                },
+            );
+        };
+        let first_id = Some("12345");
+        let next_id = Some("67890");
 
         let one = Track {
             title: "One".into(),
@@ -411,53 +423,62 @@ mod tests {
         let now = Instant::now();
         let one = Listening::new(&one, None, now);
         let two = Listening::new(&two, None, now);
-        worker.update(1, true, Some(one.clone()));
+        update(1, true, first_id, Some(one.clone()));
         wait_for(&worker, 1, PresenceStatus::Unavailable);
 
         let listener = UnixListener::bind(path).unwrap();
         listener.set_nonblocking(true).unwrap();
-        let mut initial = accept(&listener);
+        let mut initial = accept(&listener, "12345");
         assert_eq!(activity_request(&mut initial), one.payload());
         wait_for(&worker, 1, PresenceStatus::Sharing);
         drop(initial);
 
         wait_for(&worker, 1, PresenceStatus::Unavailable);
-        worker.update(2, true, Some(two.clone()));
-        let mut reconnected = accept(&listener);
+        update(2, true, first_id, Some(two.clone()));
+        let mut reconnected = accept(&listener, "12345");
         assert_eq!(activity_request(&mut reconnected), two.payload());
         wait_for(&worker, 2, PresenceStatus::Sharing);
 
-        let timed = Listening {
-            progress: Some(Progress::Advancing {
-                start: 1_790_000_000_000,
-                end: 1_790_000_210_000,
-            }),
-            ..two.clone()
-        };
-        worker.update(3, true, Some(timed));
+        let now = Instant::now();
+        let mut player = crate::state::Player::default();
+        let wall_time = UNIX_EPOCH + Duration::from_secs(1_790_000_000);
+        player.progress(0, 210, now, wall_time);
+        let timed = Listening::new(&two.track, player.timing, now);
+        update(3, true, next_id, Some(timed));
+        assert_eq!(activity_request(&mut reconnected), Value::Null);
+        let mut reconnected = accept(&listener, "67890");
         let request = activity_request(&mut reconnected);
         assert_eq!(request["name"], "Two");
         assert_eq!(
             request["timestamps"],
-            json!({ "start": 1_790_000_000_000_u64, "end": 1_790_000_210_000_u64 })
+            json!({ "start": 1_790_000_000_u64, "end": 1_790_000_210_u64 })
         );
         wait_for(&worker, 3, PresenceStatus::Sharing);
 
-        worker.update(4, true, None);
+        update(4, true, next_id, None);
         assert_eq!(activity_request(&mut reconnected), Value::Null);
         wait_for(&worker, 4, PresenceStatus::Sharing);
-        worker.update(5, true, Some(one.clone()));
+        update(5, true, next_id, Some(one.clone()));
         assert_eq!(activity_request(&mut reconnected), one.payload());
         wait_for(&worker, 5, PresenceStatus::Sharing);
 
-        worker.update(6, false, None);
+        update(6, true, None, None);
         assert_eq!(activity_request(&mut reconnected), Value::Null);
-        wait_for(&worker, 6, PresenceStatus::Off);
+        wait_for(&worker, 6, PresenceStatus::Unavailable);
 
-        worker.update(7, true, Some(two.clone()));
-        let mut final_connection = accept(&listener);
-        assert_eq!(activity_request(&mut final_connection), two.payload());
+        update(7, true, next_id, Some(two.clone()));
+        let mut reconnected = accept(&listener, "67890");
+        assert_eq!(activity_request(&mut reconnected), two.payload());
         wait_for(&worker, 7, PresenceStatus::Sharing);
+
+        update(8, false, None, None);
+        assert_eq!(activity_request(&mut reconnected), Value::Null);
+        wait_for(&worker, 8, PresenceStatus::Off);
+
+        update(9, true, next_id, Some(two.clone()));
+        let mut final_connection = accept(&listener, "67890");
+        assert_eq!(activity_request(&mut final_connection), two.payload());
+        wait_for(&worker, 9, PresenceStatus::Sharing);
         let shutdown = thread::spawn(move || drop(worker));
         assert_eq!(activity_request(&mut final_connection), Value::Null);
         shutdown.join().unwrap();
@@ -476,7 +497,7 @@ mod tests {
         }
     }
 
-    fn accept(listener: &UnixListener) -> UnixStream {
+    fn accept(listener: &UnixListener, application_id: &str) -> UnixStream {
         let deadline = Instant::now() + Duration::from_secs(4);
         let mut stream = loop {
             match listener.accept() {
@@ -497,7 +518,7 @@ mod tests {
         assert_eq!(opcode, HANDSHAKE);
         assert_eq!(
             serde_json::from_slice::<Value>(&data).unwrap(),
-            json!({"v": 1, "client_id": "12345"})
+            json!({"v": 1, "client_id": application_id})
         );
         write_frame(&mut stream, PING, b"ping").unwrap();
         assert_eq!(read_frame(&mut stream).unwrap(), (PONG, b"ping".to_vec()));

@@ -94,12 +94,10 @@ fn main() -> Result<()> {
     let settings = Store::load(Overrides {
         name: options.name,
         no_online_lyrics: options.no_online_lyrics,
+        discord_app_id: options.discord_app_id,
     });
     let mut app = App::new(settings, options.uxplay, Instant::now())?;
-    let discord = options
-        .discord_app_id
-        .map(discord::Worker::spawn)
-        .transpose()?;
+    let discord = discord::Worker::spawn()?;
 
     let mut sharing = Sharing::default();
     loop {
@@ -109,7 +107,12 @@ fn main() -> Result<()> {
         }
         let now = Instant::now();
         app.poll(now);
-        sharing.sync(&mut app.session.player, discord.as_ref(), now);
+        sharing.sync(
+            &mut app.session.player,
+            &discord,
+            app.settings.discord_app_id(),
+            now,
+        );
         let screen = terminal.draw(
             &app.session.player,
             app.settings.name(),
@@ -135,7 +138,7 @@ fn main() -> Result<()> {
             }
             Event::Paste(text) => {
                 if let Some(dialog) = &mut app.dialog {
-                    dialog.insert_name(&text);
+                    dialog.insert_text(&text);
                 }
                 None
             }
@@ -148,7 +151,6 @@ fn main() -> Result<()> {
             Some(Action::Settings(input)) => app.settings_input(input, Instant::now()),
             Some(Action::Discord) => {
                 sharing.enabled = !sharing.enabled;
-                sharing.sync(&mut app.session.player, discord.as_ref(), Instant::now());
             }
             Some(Action::CycleVisualizer) => app.session.player.cycle_visualizer(),
             Some(Action::Scroll(delta)) => {
@@ -287,38 +289,42 @@ impl Session {
 #[derive(Default)]
 struct Sharing {
     enabled: bool,
-    submitted: Option<(bool, Option<discord::Listening>)>,
+    submitted: discord::Desired,
     revision: u64,
 }
 
 impl Sharing {
-    fn sync(&mut self, player: &mut Player, worker: Option<&discord::Worker>, now: Instant) {
-        let activity = if self.enabled {
-            player
-                .track
-                .as_ref()
-                .map(|track| discord::Listening::new(track, player.timing, now))
-        } else {
-            None
+    fn sync(
+        &mut self,
+        player: &mut Player,
+        worker: &discord::Worker,
+        application_id: Option<&str>,
+        now: Instant,
+    ) {
+        let application_id = application_id.filter(|_| self.enabled);
+        let activity = application_id
+            .and(player.track.as_ref())
+            .map(|track| discord::Listening::new(track, player.timing, now));
+        let desired = discord::Desired {
+            enabled: self.enabled,
+            application_id: application_id.map(str::to_owned),
+            activity,
         };
-        let desired = (self.enabled, activity);
-        if self.submitted.as_ref() != Some(&desired) {
+        if self.submitted != desired {
             self.revision += 1;
-            if let Some(worker) = worker {
-                worker.update(self.revision, desired.0, desired.1.clone());
-            }
+            worker.update(self.revision, desired.clone());
             if !self.enabled {
                 player.discord = PresenceStatus::Off;
-            } else if worker.is_none() || player.discord == PresenceStatus::Off {
+            } else if self.submitted.application_id != desired.application_id
+                || player.discord == PresenceStatus::Off
+            {
                 player.discord = PresenceStatus::Unavailable;
             }
-            self.submitted = Some(desired);
+            self.submitted = desired;
         }
-        if let Some(worker) = worker {
-            for (revision, status) in worker.status.try_iter() {
-                if revision == self.revision {
-                    player.discord = status;
-                }
+        for (revision, status) in worker.status.try_iter() {
+            if revision == self.revision {
+                player.discord = status;
             }
         }
     }

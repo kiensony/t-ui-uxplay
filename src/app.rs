@@ -491,7 +491,7 @@ exec sleep 60
     }
 
     #[test]
-    fn view_and_lyrics_saves_preserve_the_active_receiver() {
+    fn non_name_saves_preserve_the_active_receiver() {
         let mut fixture = Fixture::new();
         fixture.app.session.player.set_track(
             Some(Track {
@@ -503,6 +503,8 @@ exec sleep 60
         fixture.app.open_settings();
         fixture.input(Input::Activate(settings::Field::View));
         fixture.input(Input::Activate(settings::Field::Lyrics));
+        fixture.input(Input::Activate(settings::Field::DiscordAppId));
+        fixture.app.dialog.as_mut().unwrap().insert_text("12345");
         fixture.input(Input::Activate(settings::Field::Save));
         assert!(fixture.app.dialog.is_none());
         assert!(fixture.app.session.player.connected);
@@ -518,5 +520,6 @@ exec sleep 60
         fixture.app.session.player.cycle_visualizer();
         let reloaded = Store::open(Ok(fixture.path.clone()), Overrides::default());
         assert_eq!(reloaded.saved.view, settings::View::Ribbons);
+        assert_eq!(reloaded.discord_app_id(), Some("12345"));
     }
 }
