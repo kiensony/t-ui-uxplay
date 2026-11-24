@@ -1,7 +1,9 @@
+mod app;
 mod dacp;
 mod discord;
 mod lyrics;
 mod receiver;
+mod settings;
 mod spectrum;
 mod state;
 mod terminal;
@@ -11,11 +13,11 @@ mod ui;
 mod acceptance;
 
 use anyhow::{Context, Result, bail};
+use app::App;
 use clap::Parser;
-use crossterm::event::{
-    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
-};
+use crossterm::event::{self, Event, MouseButton, MouseEventKind};
 use receiver::{LogEvent, Receiver};
+use settings::{Overrides, Store};
 #[cfg(unix)]
 use signal_hook::{
     consts::signal::{SIGHUP, SIGINT, SIGTERM},
@@ -38,8 +40,8 @@ use ui::Action;
 #[command(version, about)]
 struct Options {
     /// Name shown in the sender's AirPlay audio picker
-    #[arg(long, default_value = "t-ui-uxplay", value_parser = receiver_name)]
-    name: String,
+    #[arg(long, value_parser = receiver_name)]
+    name: Option<String>,
 
     /// UxPlay executable or path. Defaults to the bundled receiver, then PATH.
     #[arg(long)]
@@ -55,9 +57,15 @@ struct Options {
 }
 
 fn receiver_name(value: &str) -> Result<String, &'static str> {
+    if value.chars().any(char::is_control) {
+        return Err("Speaker names cannot contain control characters");
+    }
     let value = value.trim();
-    if value.is_empty() || value.starts_with('-') || value.chars().any(char::is_control) {
-        return Err("Use a nonempty AirPlay name without control characters or a leading hyphen");
+    if value.is_empty() || value.starts_with('-') {
+        return Err("Enter a speaker name without a leading hyphen");
+    }
+    if value.len() > 50 {
+        return Err("Speaker names can use up to 50 UTF-8 bytes");
     }
     Ok(value.to_owned())
 }
@@ -83,64 +91,41 @@ fn main() -> Result<()> {
         stop
     };
     let mut terminal = PlayerTerminal::open()?;
-    let mut receiver = Receiver::spawn(options.uxplay.as_deref(), &options.name)?;
-    let dacp = dacp::Worker::spawn()?;
-    let lyrics = (!options.no_online_lyrics)
-        .then(lyrics::Worker::spawn)
-        .transpose()?;
+    let settings = Store::load(Overrides {
+        name: options.name,
+        no_online_lyrics: options.no_online_lyrics,
+    });
+    let mut app = App::new(settings, options.uxplay, Instant::now())?;
     let discord = options
         .discord_app_id
         .map(discord::Worker::spawn)
         .transpose()?;
 
-    let mut session = Session::default();
-    session.player.lyrics_disabled = options.no_online_lyrics;
     let mut sharing = Sharing::default();
     loop {
         #[cfg(unix)]
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        session.poll_receiver(&mut receiver, &dacp, Instant::now())?;
         let now = Instant::now();
-        let visualizing = session.player.visualizer.is_some();
-        session.player.spectrum = if session.player.connected && visualizing {
-            receiver.spectrum.latest(now)
+        app.poll(now);
+        sharing.sync(&mut app.session.player, discord.as_ref(), now);
+        let screen = terminal.draw(
+            &app.session.player,
+            app.settings.name(),
+            now,
+            app.dialog.as_ref(),
+        )?;
+        let frame_ms = if app.session.player.visualizer.is_some() {
+            42
         } else {
-            None
+            100
         };
-        sharing.sync(&mut session.player, discord.as_ref(), now);
-        if let Some(lyrics) = &lyrics {
-            if let Some(request) = session.player.lyrics_request(now) {
-                lyrics.request(request);
-            }
-            for (request, result) in lyrics.results.try_iter() {
-                session.player.set_lyrics(&request, result);
-            }
-        }
-
-        let screen = terminal.draw(&session.player, &options.name, now)?;
-        let frame_ms = if visualizing { 42 } else { 100 };
         if !event::poll(Duration::from_millis(frame_ms))? {
             continue;
         }
         let action = match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    Some(Action::Quit)
-                } else if key.modifiers == KeyModifiers::NONE {
-                    ui::key_action(key.code)
-                } else {
-                    None
-                }
-            }
-            Event::Key(key)
-                if key.kind == KeyEventKind::Repeat
-                    && key.modifiers == KeyModifiers::NONE
-                    && matches!(key.code, KeyCode::Up | KeyCode::Down) =>
-            {
-                ui::key_action(key.code)
-            }
+            Event::Key(key) => screen.key(key),
             Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left) => {
                 screen.click(mouse.column, mouse.row)
             }
@@ -148,29 +133,37 @@ fn main() -> Result<()> {
                 terminal.resized()?;
                 None
             }
+            Event::Paste(text) => {
+                if let Some(dialog) = &mut app.dialog {
+                    dialog.insert_name(&text);
+                }
+                None
+            }
             _ => None,
         };
         match action {
             Some(Action::Quit) => break,
-            Some(Action::Transport(command)) if session.player.transport => {
-                dacp.control(session.transport_revision, command);
-            }
+            Some(Action::Transport(command)) => app.transport(command),
+            Some(Action::OpenSettings) => app.open_settings(),
+            Some(Action::Settings(input)) => app.settings_input(input, Instant::now()),
             Some(Action::Discord) => {
                 sharing.enabled = !sharing.enabled;
-                sharing.sync(&mut session.player, discord.as_ref(), Instant::now());
+                sharing.sync(&mut app.session.player, discord.as_ref(), Instant::now());
             }
-            Some(Action::CycleVisualizer) => session.player.cycle_visualizer(),
+            Some(Action::CycleVisualizer) => app.session.player.cycle_visualizer(),
             Some(Action::Scroll(delta)) => {
                 let offset = screen
                     .scroll_top
                     .saturating_add_signed(isize::from(delta))
                     .min(screen.scroll_max);
                 if screen.scroll_max > 0 {
-                    session.player.scroll_lyrics(offset, now);
+                    app.session.player.scroll_lyrics(offset, now);
                 }
             }
-            Some(Action::AdjustLyricSync(delta_ms)) => session.player.adjust_lyric_sync(delta_ms),
-            _ => {}
+            Some(Action::AdjustLyricSync(delta_ms)) => {
+                app.session.player.adjust_lyric_sync(delta_ms)
+            }
+            None => {}
         }
     }
     Ok(())
@@ -179,6 +172,7 @@ fn main() -> Result<()> {
 #[derive(Default)]
 struct Session {
     player: Player,
+    sender_connected: bool,
     diagnostic: Option<String>,
     credentials: Option<dacp::Credentials>,
     transport_revision: u64,
@@ -190,21 +184,32 @@ impl Session {
         receiver: &mut Receiver,
         dacp: &dacp::Worker,
         now: Instant,
-    ) -> Result<()> {
+    ) -> Result<Option<Instant>> {
         let exit = receiver
             .exit_status()
             .context("Could not check UxPlay status")?;
         let mut progress = None;
+        let mut advertised = None;
         for log in receiver.logs.try_iter() {
             match log.event {
-                LogEvent::Ready => self.player.ready = true,
-                LogEvent::Connected => self.player.connected = true,
+                LogEvent::Ready => {
+                    self.player.ready = true;
+                    advertised.get_or_insert(log.received_at);
+                }
+                LogEvent::Connected => {
+                    self.sender_connected = true;
+                    self.player.connected = true;
+                }
                 LogEvent::StreamStarted => {
+                    self.sender_connected = true;
                     self.player.stream_started(now);
                     receiver.spectrum.clear();
                     progress = None;
                 }
-                LogEvent::Disconnected => {
+                LogEvent::StreamStopped | LogEvent::Disconnected => {
+                    if log.event == LogEvent::Disconnected {
+                        self.sender_connected = false;
+                    }
                     self.player.disconnect(now);
                     receiver.spectrum.clear();
                     self.set_credentials(dacp, None);
@@ -255,7 +260,18 @@ impl Session {
                 self.player.transport = available;
             }
         }
-        Ok(())
+        Ok(advertised)
+    }
+
+    fn reset_receiver(&mut self, dacp: &dacp::Worker, now: Instant) {
+        self.player.disconnect(now);
+        self.player.ready = false;
+        self.player.receiver_unavailable = false;
+        self.player.reconnect = false;
+        self.player.spectrum = None;
+        self.sender_connected = false;
+        self.diagnostic = None;
+        self.set_credentials(dacp, None);
     }
 
     fn set_credentials(&mut self, worker: &dacp::Worker, credentials: Option<dacp::Credentials>) {
@@ -322,7 +338,7 @@ mod tests {
             "#!/bin/sh\n\
              while [ \"$1\" != -md ]; do shift; done\n\
              printf 'Title: Early Song\\nArtist: Test Artist\\n\\000' > \"$2\"\n\
-             printf 'register_dnssd: advertised AirPlay service\\n'\n\
+             printf 'register_dnssd: advertised AirPlay service with \"Features\" code = 0x527FFEE6\\n'\n\
              while [ ! -e '{}' ]; do sleep 0.02; done\n\
              printf 'Open connections: 1\\n'\n\
              exec sleep 10\n",

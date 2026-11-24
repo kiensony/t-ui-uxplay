@@ -9,7 +9,11 @@ use std::{
     collections::HashMap,
     io::Read,
     ops::Range,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, Sender},
+    },
     thread,
     time::Duration,
 };
@@ -364,6 +368,7 @@ fn lookup_word_timing(
     base: &str,
     key: &Key,
     matched_duration: Option<f64>,
+    active: impl Fn() -> bool,
 ) -> Option<Lyrics> {
     let duration = key.duration.map(f64::from).or(matched_duration)?;
     let track = &key.track;
@@ -398,15 +403,19 @@ fn lookup_word_timing(
         })
     });
 
-    candidates.into_iter().take(2).find_map(|entry| {
-        let response = client
-            .get(format!("{base}/api/get/{}", entry.id))
-            .timeout(WORD_LOOKUP_TIMEOUT)
-            .send()
-            .ok()?;
-        let lyrics = Lyrics::from(read_json::<Record>(response).ok()?);
-        lyrics.has_word_timing().then_some(lyrics)
-    })
+    candidates
+        .into_iter()
+        .take(2)
+        .take_while(|_| active())
+        .find_map(|entry| {
+            let response = client
+                .get(format!("{base}/api/get/{}", entry.id))
+                .timeout(WORD_LOOKUP_TIMEOUT)
+                .send()
+                .ok()?;
+            let lyrics = Lyrics::from(read_json::<Record>(response).ok()?);
+            lyrics.has_word_timing().then_some(lyrics)
+        })
 }
 
 fn match_text(value: &str) -> String {
@@ -436,7 +445,8 @@ fn read_json<T: DeserializeOwned>(response: Response) -> Result<T> {
 }
 
 pub struct Worker {
-    send: Sender<Request>,
+    send: Sender<(u64, Request)>,
+    epoch: Arc<AtomicU64>,
     pub results: Receiver<(Request, Lyrics)>,
 }
 
@@ -455,14 +465,20 @@ impl Worker {
     }
 
     fn start(client: Client, base: &'static str) -> Result<Self> {
-        let (send, requests) = mpsc::channel::<Request>();
+        let (send, requests) = mpsc::channel::<(u64, Request)>();
         let (results, inbox) = mpsc::channel();
+        let epoch = Arc::new(AtomicU64::new(0));
+        let worker_epoch = epoch.clone();
         thread::Builder::new()
             .name("lrclib".into())
             .spawn(move || {
                 let mut cache = HashMap::<Key, Lyrics>::new();
                 while let Ok(first) = requests.recv() {
-                    let request = requests.try_iter().last().unwrap_or(first);
+                    let (revision, request) = requests.try_iter().last().unwrap_or(first);
+                    let active = || worker_epoch.load(Ordering::Acquire) == revision;
+                    if !active() {
+                        continue;
+                    }
                     if let Some(cached) = cache.get(&request.key) {
                         if results.send((request, cached.clone())).is_err() {
                             break;
@@ -472,32 +488,44 @@ impl Worker {
 
                     let (mut lyrics, duration) =
                         lookup(&client, base, &request.key).unwrap_or((Lyrics::Failed, None));
+                    if !active() {
+                        continue;
+                    }
                     if results.send((request.clone(), lyrics.clone())).is_err() {
                         break;
                     }
                     if matches!(lyrics, Lyrics::Found { .. })
                         && !lyrics.has_word_timing()
+                        && active()
                         && let Some(upgrade) =
-                            lookup_word_timing(&client, base, &request.key, duration)
+                            lookup_word_timing(&client, base, &request.key, duration, active)
+                        && active()
                     {
                         lyrics = upgrade;
                         if results.send((request.clone(), lyrics.clone())).is_err() {
                             break;
                         }
                     }
-                    if !matches!(lyrics, Lyrics::Failed) {
+                    if active() && !matches!(lyrics, Lyrics::Failed) {
                         cache.insert(request.key, lyrics);
                     }
                 }
             })?;
         Ok(Self {
             send,
+            epoch,
             results: inbox,
         })
     }
 
     pub fn request(&self, request: Request) {
-        let _ = self.send.send(request);
+        let _ = self
+            .send
+            .send((self.epoch.load(Ordering::Acquire), request));
+    }
+
+    pub fn cancel(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -569,7 +597,7 @@ lines:
             let at = now + Duration::from_millis(offset_ms);
             terminal
                 .draw(|frame| {
-                    crate::ui::draw(frame, &player, "Test", false, at);
+                    crate::ui::draw(frame, &player, "Test", false, at, None);
                 })
                 .unwrap();
             assert_eq!(
@@ -630,6 +658,7 @@ lines:
                     "Test",
                     false,
                     now + Duration::from_millis(475),
+                    None,
                 );
             })
             .unwrap();
@@ -759,8 +788,51 @@ lines:
         (client, listener)
     }
 
+    #[test]
+    fn disabling_lookup_drops_in_flight_and_queued_results_and_skips_followups() {
+        let (client, listener) = mock_client();
+        let worker = Worker::start(client, "http://mock.lrclib").unwrap();
+        let request = |generation, title: &str| Request {
+            generation,
+            key: Key {
+                track: Track {
+                    title: title.into(),
+                    artist: "Artist".into(),
+                    ..Track::default()
+                },
+                duration: Some(120),
+            },
+        };
+        worker.request(request(1, "First"));
+        let (stream, _) = listener.accept().unwrap();
+        let mut stream = read_request(
+            stream,
+            "/api/get?track_name=First&artist_name=Artist&duration=120",
+        );
+        worker.request(request(2, "Queued"));
+        worker.cancel();
+        write_response(
+            &mut stream,
+            r#"{"duration":120,"instrumental":false,"syncedLyrics":"[00:03.25]First"}"#,
+        );
+        drop(stream);
+        worker.request(request(3, "Current"));
+        respond(
+            &listener,
+            "/api/get?track_name=Current&artist_name=Artist&duration=120",
+            r#"{"instrumental":true}"#,
+        );
+        let (result, _) = worker.results.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(result.generation, 3);
+        assert!(worker.results.try_recv().is_err());
+    }
+
     fn respond(listener: &TcpListener, path: &str, payload: &str) {
         let (stream, _) = listener.accept().unwrap();
+        write_response(&mut read_request(stream, path), payload);
+    }
+
+    fn read_request(stream: std::net::TcpStream, path: &str) -> BufReader<std::net::TcpStream> {
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
@@ -774,6 +846,10 @@ lines:
                 break;
             }
         }
+        stream
+    }
+
+    fn write_response(stream: &mut BufReader<std::net::TcpStream>, payload: &str) {
         write!(
             stream.get_mut(),
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",

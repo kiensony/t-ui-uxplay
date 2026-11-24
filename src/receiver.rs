@@ -185,6 +185,7 @@ pub enum LogEvent {
     Ready,
     Connected,
     StreamStarted,
+    StreamStopped,
     Disconnected,
     Progress(u32, u32),
     Diagnostic(String),
@@ -244,20 +245,25 @@ pub fn parse_log(line: &str) -> Option<LogEvent> {
             _ => Some(LogEvent::Connected),
         };
     }
-    if line.contains("TEARDOWN request,  96=1")
-        || line.contains("TEARDOWN request,  96=0, 110=0")
-        || line.contains("lost connection with client")
-    {
+    if line.contains("TEARDOWN request,  96=1") || line.contains("TEARDOWN request,  96=0, 110=0") {
+        return Some(LogEvent::StreamStopped);
+    }
+    if line.contains("lost connection with client") {
         return Some(LogEvent::Disconnected);
     }
     if line.contains(" spf=") && line.contains(" usingScreen=") && line.contains("audioFormat=") {
         return Some(LogEvent::StreamStarted);
     }
-    if line.contains("register_dnssd: advertised AirPlay service") {
+    if line
+        .trim()
+        .strip_prefix("register_dnssd: advertised AirPlay service with \"Features\" code = 0x")
+        .is_some_and(|code| !code.is_empty() && code.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
         return Some(LogEvent::Ready);
     }
     if line.contains("dnssd_register_raop failed")
         || line.contains("dnssd_register_airplay failed")
+        || line.contains("No DNS-SD Server found")
         || line.contains("failed to initialize http daemon")
         || line.contains("GStreamer gst_parse_launch failed")
         || line.contains("gst_parse_launch error (audio")

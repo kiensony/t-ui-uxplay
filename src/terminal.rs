@@ -1,11 +1,12 @@
 use crate::{
+    settings::Dialog,
     state::Player,
     ui::{self, Screen},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -33,6 +34,11 @@ impl PlayerTerminal {
         terminal::enable_raw_mode()?;
         let mode = TerminalMode;
         execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, Hide)?;
+        if let Err(error) = execute!(io::stdout(), EnableBracketedPaste)
+            && error.kind() != io::ErrorKind::Unsupported
+        {
+            return Err(error);
+        }
         let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
         Ok(Self {
             terminal,
@@ -41,10 +47,16 @@ impl PlayerTerminal {
         })
     }
 
-    pub fn draw(&mut self, player: &Player, name: &str, now: Instant) -> io::Result<Screen> {
+    pub fn draw(
+        &mut self,
+        player: &Player,
+        name: &str,
+        now: Instant,
+        dialog: Option<&Dialog>,
+    ) -> io::Result<Screen> {
         let mut screen = Screen::default();
         self.terminal.draw(|frame| {
-            screen = ui::draw(frame, player, name, self.graphics.enabled, now);
+            screen = ui::draw(frame, player, name, self.graphics.enabled, now, dialog);
         })?;
         self.graphics.present(
             player.artwork.as_ref(),
@@ -65,6 +77,7 @@ impl Drop for TerminalMode {
     fn drop(&mut self) {
         let mut output = io::stdout();
         let _ = execute!(output, Show);
+        let _ = execute!(output, DisableBracketedPaste);
         let _ = execute!(output, DisableMouseCapture);
         let _ = execute!(output, LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();

@@ -21,7 +21,7 @@ fn now_playing_cycles_through_cover_ribbons_and_spectrum() {
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     let mut screen = ui::Screen::default();
     terminal
-        .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now))
+        .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now, None))
         .unwrap();
     assert!(screen.cover.is_some());
 
@@ -29,7 +29,7 @@ fn now_playing_cycles_through_cover_ribbons_and_spectrum() {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         player.cycle_visualizer();
         terminal
-            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now))
+            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now, None))
             .unwrap();
         assert!(screen.cover.is_none());
         let ribbons = terminal.backend().buffer().content.clone();
@@ -40,13 +40,13 @@ fn now_playing_cycles_through_cover_ribbons_and_spectrum() {
         spectrum.phase += 0.8;
         player.spectrum = Some(spectrum);
         terminal
-            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now))
+            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now, None))
             .unwrap();
         assert_ne!(terminal.backend().buffer().content, ribbons);
 
         player.cycle_visualizer();
         terminal
-            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now))
+            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now, None))
             .unwrap();
         assert!(screen.cover.is_none());
         let cells = &terminal.backend().buffer().content;
@@ -55,7 +55,7 @@ fn now_playing_cycles_through_cover_ribbons_and_spectrum() {
 
         player.cycle_visualizer();
         terminal
-            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now))
+            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now, None))
             .unwrap();
         assert_eq!(screen.cover.is_some(), width == 100);
         assert_eq!(player.visualizer, None);
@@ -101,7 +101,25 @@ fn parses_carriage_return_progress_and_connection_events() {
     assert_eq!(receiver::parse_log("TEARDOWN request,  96=0, 110=1"), None);
     assert_eq!(
         receiver::parse_log("TEARDOWN request,  96=1, 110=0"),
-        Some(Disconnected)
+        Some(StreamStopped)
+    );
+}
+
+#[test]
+fn receiver_readiness_requires_the_actual_advertisement_record() {
+    use receiver::LogEvent::Ready;
+    assert_eq!(receiver::parse_log("Initialized server socket(s)"), None);
+    assert_eq!(
+        receiver::parse_log(
+            r#"WARNING: a non-ascii (UTF-8) server-name "音 register_dnssd: advertised AirPlay service" was specified"#
+        ),
+        None
+    );
+    assert_eq!(
+        receiver::parse_log(
+            r#"register_dnssd: advertised AirPlay service with "Features" code = 0x527FFEE6"#
+        ),
+        Some(Ready)
     );
 }
 
@@ -119,6 +137,31 @@ fn late_lyrics_cannot_replace_the_active_track() {
     player.disconnect(now);
     player.set_lyrics(&current, lyrics::Lyrics::Instrumental);
     assert!(player.lyrics.is_none());
+}
+
+#[test]
+fn toggling_lyrics_clears_the_panel_and_invalidates_old_results_for_the_same_track() {
+    let now = Instant::now();
+    let mut player = state::Player::default();
+    player.set_track(Some(track("Same track")), now);
+    let before = player.lyrics_request(now + Duration::from_secs(2)).unwrap();
+    player.set_lyrics(&before, lyrics::Lyrics::Instrumental);
+    player.set_online_lyrics(false);
+    assert!(player.lyrics.is_none());
+    assert!(
+        player
+            .lyrics_request(now + Duration::from_secs(3))
+            .is_none()
+    );
+    player.set_lyrics(&before, lyrics::Lyrics::Missing);
+    assert!(player.lyrics.is_none());
+
+    player.set_online_lyrics(true);
+    let after = player.lyrics_request(now + Duration::from_secs(3)).unwrap();
+    player.set_lyrics(&before, lyrics::Lyrics::Missing);
+    assert!(player.lyrics.is_none());
+    player.set_lyrics(&after, lyrics::Lyrics::Instrumental);
+    assert!(matches!(player.lyrics, Some(lyrics::Lyrics::Instrumental)));
 }
 
 #[test]
@@ -196,26 +239,92 @@ fn line_highlighting_compensates_for_rounded_progress_and_advances_between_repor
 
 #[test]
 fn unavailable_transport_cannot_be_clicked_in_compact_layout() {
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
     let mut terminal = Terminal::new(TestBackend::new(38, 18)).unwrap();
     let player = state::Player::default();
     let mut screen = None;
     terminal
         .draw(|frame| {
-            screen = Some(ui::draw(frame, &player, "Home", false, Instant::now()));
+            screen = Some(ui::draw(
+                frame,
+                &player,
+                "Home",
+                false,
+                Instant::now(),
+                None,
+            ));
         })
         .unwrap();
     let screen = screen.unwrap();
+    assert!(
+        screen.buttons[..3]
+            .iter()
+            .all(|button| button.y == screen.buttons[0].y)
+    );
     let next = screen.buttons[2];
     assert!(next.width > 0);
     assert_eq!(screen.click(next.x, next.y), None);
+    assert_eq!(
+        screen.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+        None
+    );
     assert_eq!(
         ui::key_action(KeyCode::Char('n')),
         Some(ui::Action::Transport(dacp::Command::Next))
     );
     let button = screen.buttons[3];
     assert_eq!(screen.click(button.x, button.y), Some(ui::Action::Discord));
+}
+
+#[test]
+fn transport_sits_directly_below_native_artwork() {
+    use image::DynamicImage;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let now = Instant::now();
+    let mut player = state::Player::default();
+    player.transport = true;
+    player.stage_artwork(Some(DynamicImage::new_rgb8(32, 16)), now);
+    player.set_track(Some(track("Artwork")), now);
+    let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
+    let mut screen = ui::Screen::default();
+    terminal
+        .draw(|frame| screen = ui::draw(frame, &player, "Home", true, now, None))
+        .unwrap();
+    let cover = screen.cover.unwrap();
+    assert_eq!(screen.buttons[0].y, cover.bottom());
+    for (button, command) in screen.buttons[..3].iter().zip([
+        dacp::Command::Previous,
+        dacp::Command::PlayPause,
+        dacp::Command::Next,
+    ]) {
+        assert_eq!(
+            screen.click(button.right() - 1, button.y),
+            Some(ui::Action::Transport(command))
+        );
+    }
+    assert!(screen.buttons[3].y > screen.buttons[2].y);
+
+    terminal
+        .draw(|frame| screen = ui::draw(frame, &player, "Home", false, now, None))
+        .unwrap();
+    assert!(screen.cover.is_none());
+    assert_eq!(screen.buttons[0].y, cover.bottom());
+    assert_eq!(
+        terminal.backend().buffer()[(cover.x, cover.bottom() - 1)].symbol(),
+        "▀"
+    );
+}
+
+#[test]
+fn speaker_name_validation_counts_utf8_bytes() {
+    assert_eq!(crate::receiver_name("  ห้อง 音楽  ").unwrap(), "ห้อง 音楽");
+    assert!(crate::receiver_name(&format!("{}ab", "音".repeat(16))).is_ok());
+    assert!(crate::receiver_name(&"音".repeat(17)).is_err());
+    for invalid in [" ", "-Name", "bad\nname", "\tName", "Name\x7f"] {
+        assert!(crate::receiver_name(invalid).is_err(), "{invalid:?}");
+    }
 }
 
 #[test]

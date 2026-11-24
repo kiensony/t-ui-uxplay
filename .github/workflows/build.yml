@@ -115,9 +115,14 @@ jobs:
           $env:GST_PLUGIN_SCANNER_1_0 = "$bundle\gst-plugin-scanner.exe"
           $env:GST_REGISTRY = "$env:RUNNER_TEMP\uxplay-gst-registry.bin"
 
-          $version = & "$bundle\uxplay.exe" -v
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $speaker = '音楽 Lounge'
+          $version = & "$bundle\uxplay.exe" -n $speaker -v
           if ($LASTEXITCODE -ne 0 -or ($version -join "`n") -notmatch '(?m)^UxPlay version ') {
             throw "The packaged UxPlay receiver did not start"
+          }
+          if (($version -join "`n") -notlike "*$speaker*") {
+            throw "The packaged UxPlay receiver did not preserve the Unicode speaker name"
           }
           foreach ($element in @('appsrc', 'audioconvert', 'audioresample', 'autoaudiosink',
                                 'avdec_aac', 'avdec_alac', 'decodebin', 'fdsink',

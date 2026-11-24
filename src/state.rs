@@ -87,6 +87,8 @@ pub enum Visualizer {
 #[derive(Default)]
 pub struct Player {
     pub ready: bool,
+    pub receiver_unavailable: bool,
+    pub reconnect: bool,
     pub connected: bool,
     pub transport: bool,
     pub discord: PresenceStatus,
@@ -147,6 +149,7 @@ impl Player {
 
     pub fn disconnect(&mut self, now: Instant) {
         self.stream_started(now);
+        self.replace_artwork(None);
         self.connected = false;
         self.transport = false;
     }
@@ -237,6 +240,16 @@ impl Player {
         }
         self.lyrics_requested = Some(request.clone());
         Some(request)
+    }
+
+    pub fn set_online_lyrics(&mut self, enabled: bool) {
+        if self.lyrics_disabled == enabled {
+            self.lyrics_disabled = !enabled;
+            self.generation += 1;
+            self.lyrics_requested = None;
+            self.lyrics = None;
+            self.scroll = None;
+        }
     }
 
     pub fn set_lyrics(&mut self, request: &Request, lyrics: Lyrics) {

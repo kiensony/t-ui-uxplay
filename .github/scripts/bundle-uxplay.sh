@@ -74,6 +74,27 @@ source_dir="$workspace/UxPlay-$revision"
 tar -xzf "$workspace/upstream.tar.gz" -C "$workspace"
 patch -t -N -F 0 -d "$source_dir" -p1 < "$script_dir/uxplay-flush-logs.patch"
 
+if [[ "$executable" == uxplay.exe ]]; then
+  # UxPlay reads narrow argv and must receive speaker names as UTF-8.
+  cat > "$source_dir/uxplay-utf8.manifest" <<'EOF'
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="UxPlay" version="1.0.0.0"/>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+</assembly>
+EOF
+  printf '%s\n' '1 24 "uxplay-utf8.manifest"' > "$source_dir/uxplay-utf8.rc"
+  cat >> "$source_dir/CMakeLists.txt" <<'EOF'
+
+enable_language(RC)
+target_sources(uxplay PRIVATE uxplay-utf8.rc)
+EOF
+fi
+
 cmake -S "$source_dir" -B "$workspace/build" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DNO_MARCH_NATIVE=ON -DNO_X11_DEPS=ON \
   "-DCMAKE_PREFIX_PATH=$plist_install" "-DLIBPLIST=$plist_install/$plist_link" "${cmake_options[@]}"

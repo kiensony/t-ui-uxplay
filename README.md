@@ -55,11 +55,13 @@ t-ui-uxplay --name "Living Room"
 
 Use `--uxplay /path/to/uxplay` to select a binary explicitly. Otherwise, the player tries the bundled copy first and then looks for `uxplay` on `PATH`. External copies use `stdbuf` on Linux or `gstdbuf` from Homebrew coreutils on macOS. The default receiver name is `t-ui-uxplay`.
 
+On Windows, a custom UxPlay executable needs UTF-8 command-line support for Unicode speaker names and unbuffered logs to confirm renames. The bundled executable includes both.
+
 ## Connect and control playback
 
 1. Open Apple Music on your iPhone. From Now Playing, tap AirPlay and select the receiver in the audio device list.
 2. Start a song. Album art uses Kitty graphics in Kitty and Ghostty, colored character cells in other terminals, and a text layout when the window is narrow.
-3. Click the buttons or use the keys below. Transport buttons become available when the sender’s local DACP service resolves.
+3. Use the controls below the artwork or track details. They become available when the sender’s local DACP service resolves.
 
 | Key | Action |
 | --- | --- |
@@ -68,13 +70,20 @@ Use `--uxplay /path/to/uxplay` to select a binary explicitly. Otherwise, the pla
 | `n` | Next |
 | `d` | Toggle Discord |
 | `v` | Cycle through Cover, Ribbons, and Spectrum |
+| `s` | Open Settings |
 | `↑` / `↓` | Scroll lyrics |
 | `[` / `]` | Delay or advance lyrics by 250 ms |
 | `q` | Quit and stop the receiver |
 
-The Ribbons preset uses the live AirPlay audio to rotate and warp neon trails. Spectrum shows 24 frequency bands with falling bars and peak markers. Press `v` to cycle through both presets and the album cover.
+The Ribbons preset uses the live AirPlay audio to rotate and warp neon trails. Spectrum shows 24 frequency bands with falling bars and peak markers. Press `v` to change the view for the current run.
 
-LRCLIB lookups send the title, artist, album, and available duration. If the first result has line timings, the player also checks for word timings on a release with the same song, artist, and a similar duration. Results are cached until the player quits. Use `--no-online-lyrics` to disable lookups.
+## Settings
+
+Click **Settings** or press `s`. Use `Tab` and `Shift+Tab` to move between fields, `Enter` to activate a field, and `Esc` to discard the draft. Enter a speaker name of up to 50 UTF-8 bytes. Choose **Save** to apply your changes. A rename restarts AirPlay and asks for confirmation if a sender is connected. Then reconnect using the new name.
+
+**Online lyrics** starts On and **Default view** starts on Cover. Settings are stored in `t-ui-uxplay/settings.json` under `$XDG_CONFIG_HOME` (or `~/.config`) on Linux, `~/Library/Application Support` on macOS, and `%APPDATA%` on Windows. `--name` and `--no-online-lyrics` override and lock the corresponding field for that launch.
+
+LRCLIB lookups send the title, artist, album, and available duration. If the first result has line timings, the player also checks for word timings on a release with the same song, artist, and a similar duration. Results are cached until the player quits. Turn **Online lyrics** off to clear the panel and stop lookups.
 
 The lyrics panel shows **Word sync** when the words can light up progressively as they’re sung and **Line sync** when only line timings are available. UxPlay reports whole-second progress. The player compensates for rounding, estimates playback between updates, and holds the estimate when updates stop. If lyrics still lag, press `]` to advance them by 250 ms. Press `[` to move them later. The adjustment lasts for the current run. With no timing, lyrics stay in a scrollable text view. After scrolling synced lyrics, automatic following resumes after eight seconds. [LRCLIB lyrics formats](https://lrclib.net/docs#lyrics-record-fields)
 
@@ -98,7 +107,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Before release, stream Apple Music from an iPhone on the same network. Verify audio playback, track changes, artwork, pause and seek alignment, and cleanup when the sender disconnects. Check artwork in a Kitty graphics terminal and a fallback terminal. With your actual Discord application ID, verify that the Listening activity appears, updates with the track, and clears on disconnect, toggle off, and quit.
+Before release, stream Apple Music from an iPhone on the same network. On Linux, macOS, and Windows, rename the speaker from Settings, reconnect under the new name, and use Previous, Play/Pause, and Next. Verify audio playback, track changes, artwork, pause and seek alignment, and cleanup when the sender disconnects. Check artwork in a Kitty graphics terminal and a fallback terminal. With your actual Discord application ID, verify that the Listening activity appears, updates with the track, and clears on disconnect, toggle off, and quit.
 
 ## GitHub Actions
 

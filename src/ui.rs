@@ -1,9 +1,10 @@
 use crate::{
     dacp::Command,
+    settings::{Dialog, Field, Input, Mode},
     spectrum::{BAND_COUNT, Spectrum},
     state::{Player, PresenceStatus, Visualizer, format_time},
 };
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use image::{DynamicImage, imageops::FilterType};
 use ratatui::{
     Frame,
@@ -12,11 +13,11 @@ use ratatui::{
     symbols::Marker,
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Gauge, Paragraph,
+        Block, BorderType, Clear, Gauge, Paragraph, Wrap,
         canvas::{Canvas, Line as CanvasLine},
     },
 };
-use std::{f64::consts::TAU, ops::Range, time::Instant};
+use std::{borrow::Cow, f64::consts::TAU, ops::Range, time::Instant};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -41,6 +42,8 @@ pub enum Action {
     Transport(Command),
     Discord,
     CycleVisualizer,
+    OpenSettings,
+    Settings(Input),
     Scroll(i8),
     AdjustLyricSync(i64),
     Quit,
@@ -60,6 +63,7 @@ pub fn key_action(code: KeyCode) -> Option<Action> {
         KeyCode::Char('n') => Some(BUTTON_ACTIONS[2]),
         KeyCode::Char('d') => Some(Action::Discord),
         KeyCode::Char('v') => Some(Action::CycleVisualizer),
+        KeyCode::Char('s') => Some(Action::OpenSettings),
         KeyCode::Up => Some(Action::Scroll(-1)),
         KeyCode::Down => Some(Action::Scroll(1)),
         KeyCode::Char('[') => Some(Action::AdjustLyricSync(-LYRIC_SYNC_STEP_MS)),
@@ -76,15 +80,62 @@ pub struct Screen {
     pub scroll_top: usize,
     pub scroll_max: usize,
     transport: bool,
+    settings: Rect,
+    modal: Option<SettingsScreen>,
+}
+
+struct SettingsScreen {
+    area: Rect,
+    targets: [Option<(Rect, Input)>; 4],
 }
 
 impl Screen {
     pub fn click(&self, x: u16, y: u16) -> Option<Action> {
+        let position = Position::new(x, y);
+        if let Some(modal) = &self.modal {
+            if !modal.area.contains(position) {
+                return None;
+            }
+            return modal.targets.iter().flatten().find_map(|&(area, input)| {
+                area.contains(position).then_some(Action::Settings(input))
+            });
+        }
+        if self.settings.contains(position) {
+            return Some(Action::OpenSettings);
+        }
         let index = self
             .buttons
             .iter()
-            .position(|area| area.contains(Position::new(x, y)))?;
+            .position(|area| area.contains(position))?;
         (self.transport || index == 3).then_some(BUTTON_ACTIONS[index])
+    }
+
+    pub fn key(&self, key: KeyEvent) -> Option<Action> {
+        if key.kind == KeyEventKind::Release {
+            return None;
+        }
+        if key.kind == KeyEventKind::Press
+            && key.modifiers == KeyModifiers::CONTROL
+            && key.code == KeyCode::Char('c')
+        {
+            return Some(Action::Quit);
+        }
+        if self.modal.is_some() {
+            return Dialog::key(key)
+                .filter(|input| {
+                    key.kind == KeyEventKind::Press
+                        || matches!(input, Input::Character(_) | Input::Backspace)
+                })
+                .map(Action::Settings);
+        }
+        if key.modifiers != KeyModifiers::NONE
+            || (key.kind == KeyEventKind::Repeat
+                && !matches!(key.code, KeyCode::Up | KeyCode::Down))
+        {
+            return None;
+        }
+        key_action(key.code)
+            .filter(|action| self.transport || !matches!(action, Action::Transport(_)))
     }
 }
 
@@ -94,6 +145,7 @@ pub fn draw(
     name: &str,
     native_graphics: bool,
     now: Instant,
+    dialog: Option<&Dialog>,
 ) -> Screen {
     let area = frame.area();
     let mut screen = Screen {
@@ -101,6 +153,17 @@ pub fn draw(
         ..Screen::default()
     };
     if area.is_empty() {
+        return screen;
+    }
+    if let Some(dialog) = dialog
+        && (area.width < 62 || area.height < 18)
+    {
+        screen.modal = Some(draw_settings(
+            frame,
+            dialog,
+            area,
+            player.receiver_unavailable,
+        ));
         return screen;
     }
 
@@ -115,31 +178,25 @@ pub fn draw(
         area.width - 2 * margin,
         area.height,
     );
-    let columns = match area.width {
-        84.. => 4,
-        44.. => 2,
-        _ => 1,
-    };
-    let controls_height = 4 / columns;
-    let hint_height = u16::from(area.height >= controls_height + 8);
-    let [header, body, progress, buttons, hints] = Layout::vertical([
+    let hint_height = u16::from(area.height >= 12);
+    let [header, body, progress, footer, hints] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
-        Constraint::Length(controls_height),
+        Constraint::Length(1),
         Constraint::Length(hint_height),
     ])
     .areas(area);
 
-    header_line(frame, player, name, header);
+    screen.settings = header_line(frame, player, name, header);
     draw_progress(frame, player, progress);
-    screen.buttons = draw_buttons(frame, player, buttons, columns);
+    screen.buttons[3] = draw_discord(frame, player, footer);
     let help = if player.connected && !player.transport && hints.width >= 80 {
-        "v Visualizer  ↑↓ Scroll  [] Sync  d Discord  q Quit  ·  Sender controls unavailable"
-    } else if hints.width >= 54 {
-        "v Visualizer  ↑↓ Scroll  [] Sync  d Discord  q Quit"
+        "v View  ↑↓ Scroll  [] Sync  d Discord  q Quit  ·  Sender controls unavailable"
+    } else if hints.width >= 68 {
+        "p Space n Playback  v View  ↑↓ Scroll  [] Sync  d Discord  q Quit"
     } else {
-        "v Visualizer  q Quit  ↑↓ Scroll  [] Sync  d Discord"
+        "v View  q Quit  ↑↓ Scroll  [] Sync  d Discord"
     };
     frame.render_widget(Paragraph::new(help).style(Style::new().fg(MUTED)), hints);
 
@@ -156,36 +213,69 @@ pub fn draw(
         let track_height = if player.visualizer.is_some() && body.height >= 10 {
             (body.height / 2).clamp(7, 11)
         } else {
-            5
+            6
         };
         let [track, lyrics] =
             Layout::vertical([Constraint::Length(track_height), Constraint::Min(0)]).areas(body);
         (track, lyrics)
     };
 
-    screen.cover = draw_track(frame, player, track, wide, native_graphics);
+    let (cover, buttons) = draw_track(frame, player, name, track, wide, native_graphics);
+    screen.cover = cover;
+    screen.buttons[..3].copy_from_slice(&buttons);
     (screen.scroll_top, screen.scroll_max) = draw_lyrics(frame, player, lyrics, now);
+    if let Some(dialog) = dialog {
+        let area = frame.area();
+        let area = Rect::new(
+            area.x + (area.width - 60) / 2,
+            area.y + (area.height - 16) / 2,
+            60,
+            16,
+        );
+        screen.modal = Some(draw_settings(
+            frame,
+            dialog,
+            area,
+            player.receiver_unavailable,
+        ));
+        screen.cover = None;
+    }
     screen
 }
 
-fn header_line(frame: &mut Frame, player: &Player, name: &str, area: Rect) {
-    let (status, color) = if player.connected {
+fn header_line(frame: &mut Frame, player: &Player, name: &str, area: Rect) -> Rect {
+    let (status, color) = if player.receiver_unavailable {
+        ("Receiver unavailable", WARNING)
+    } else if player.connected {
         ("Connected", ACCENT)
     } else if player.ready {
         ("Ready", MUTED)
     } else {
         ("Starting UxPlay", WARNING)
     };
-    let [label, status_area] = Layout::horizontal([
+    let settings_label = if area.width >= 16 {
+        " Settings "
+    } else {
+        " s "
+    };
+    let [label, status_area, _, settings] = Layout::horizontal([
         Constraint::Fill(1),
-        Constraint::Length(status.width() as u16),
+        Constraint::Length(
+            (status.width() as u16).min(area.width.saturating_sub(settings_label.len() as u16 + 1)),
+        ),
+        Constraint::Length(1),
+        Constraint::Length(settings_label.len() as u16),
     ])
     .areas(area);
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("AirPlay", Style::new().fg(ACCENT).bold()),
-            Span::styled(format!("  /  {name}"), Style::new().fg(TEXT)),
-        ])),
+        Paragraph::new(if label.width >= 42 {
+            Line::from(vec![
+                Span::styled("AirPlay", Style::new().fg(ACCENT).bold()),
+                Span::styled(format!("  /  {name}"), Style::new().fg(TEXT)),
+            ])
+        } else {
+            Line::styled(name, Style::new().fg(TEXT).bold())
+        }),
         label,
     );
     frame.render_widget(
@@ -194,6 +284,11 @@ fn header_line(frame: &mut Frame, player: &Player, name: &str, area: Rect) {
             .right_aligned(),
         status_area,
     );
+    frame.render_widget(
+        Paragraph::new(settings_label).style(Style::new().fg(TEXT).bg(BORDER)),
+        settings,
+    );
+    settings
 }
 
 fn card(title: impl Into<Line<'static>>) -> Block<'static> {
@@ -204,13 +299,234 @@ fn card(title: impl Into<Line<'static>>) -> Block<'static> {
         .style(Style::new().bg(SURFACE).fg(TEXT))
 }
 
+fn draw_settings(
+    frame: &mut Frame,
+    dialog: &Dialog,
+    area: Rect,
+    unavailable: bool,
+) -> SettingsScreen {
+    let mut screen = SettingsScreen {
+        area,
+        targets: [None; 4],
+    };
+    frame.render_widget(Clear, area);
+    let content = if area.width >= 12 && area.height >= 8 {
+        let shell = card(" Settings ");
+        let content = shell.inner(area);
+        frame.render_widget(shell, area);
+        content
+    } else {
+        frame.render_widget(Block::new().style(Style::new().bg(SURFACE).fg(TEXT)), area);
+        area
+    };
+    if content.is_empty() {
+        return screen;
+    }
+    let inset = u16::from(content.width >= 30);
+    let content = Rect::new(
+        content.x + inset,
+        content.y,
+        content.width - 2 * inset,
+        content.height,
+    );
+    let help = u16::from(content.height >= 7);
+    match dialog.mode {
+        Mode::Edit => {
+            let [name, lyrics, view, notice, save, hints] = Layout::vertical([
+                Constraint::Length(2),
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Fill(1),
+                Constraint::Length(1),
+                Constraint::Length(help),
+            ])
+            .areas(content);
+            let [name_label, input] = Layout::vertical([Constraint::Length(1); 2]).areas(name);
+            let locked = dialog.locked(Field::Name);
+            let label = if locked {
+                "Speaker name (--name)"
+            } else {
+                "Speaker name"
+            };
+            frame.render_widget(
+                Paragraph::new(label).style(Style::new().fg(MUTED)),
+                name_label,
+            );
+            let selected = dialog.focus == Field::Name && dialog.name_selected;
+            let style = if selected {
+                Style::new().fg(BACKGROUND).bg(ACCENT)
+            } else {
+                option_style(dialog.focus == Field::Name, locked)
+            };
+            let mut value = dialog.name();
+            if dialog.focus == Field::Name && !selected {
+                let mut width = 1;
+                let mut start = value.len();
+                for (index, grapheme) in value.grapheme_indices(true).rev() {
+                    width += grapheme.width();
+                    if width > usize::from(input.width) {
+                        break;
+                    }
+                    start = index;
+                }
+                value = &value[start..];
+            }
+            let cursor = if dialog.focus == Field::Name && !selected {
+                "▏"
+            } else {
+                ""
+            };
+            frame.render_widget(
+                Paragraph::new(format!("{value}{cursor}")).style(style),
+                input,
+            );
+            let lyrics_value = if dialog.online_lyrics() { "On" } else { "Off" };
+            let lyrics_label = if dialog.locked(Field::Lyrics) {
+                format!("Online lyrics  {lyrics_value}  (--no-online-lyrics)")
+            } else {
+                format!("Online lyrics  {lyrics_value} ›")
+            };
+            for (field, label, row) in [
+                (Field::Lyrics, lyrics_label, lyrics),
+                (
+                    Field::View,
+                    format!("Default view   {} ›", dialog.draft.view.label()),
+                    view,
+                ),
+            ] {
+                frame.render_widget(
+                    Paragraph::new(label)
+                        .style(option_style(dialog.focus == field, dialog.locked(field))),
+                    row,
+                );
+            }
+            draw_notice(frame, dialog, unavailable, notice);
+            let save = dialog_button(
+                frame,
+                save,
+                if unavailable {
+                    " Save & retry "
+                } else {
+                    " Save "
+                },
+                dialog.focus == Field::Save,
+            );
+            frame.render_widget(
+                Paragraph::new("Tab/Shift+Tab · Enter · Esc").style(Style::new().fg(MUTED)),
+                hints,
+            );
+            screen.targets = [
+                (name, Field::Name),
+                (lyrics, Field::Lyrics),
+                (view, Field::View),
+                (save, Field::Save),
+            ]
+            .map(|(area, field)| (!dialog.locked(field)).then_some((area, Input::Activate(field))));
+        }
+        Mode::Confirm { rename } => {
+            let [message, buttons, hints] = Layout::vertical([
+                Constraint::Fill(1),
+                Constraint::Length(1),
+                Constraint::Length(help),
+            ])
+            .areas(content);
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "Rename to {}?\nThe connected sender will be disconnected.",
+                    dialog.name().trim()
+                ))
+                .wrap(Wrap { trim: true }),
+                message,
+            );
+            let [_, cancel, _, confirm] = Layout::horizontal([
+                Constraint::Fill(1),
+                Constraint::Length(8),
+                Constraint::Length(1),
+                Constraint::Length(8),
+            ])
+            .areas(buttons);
+            screen.targets[0] = Some((
+                dialog_button(frame, cancel, " Cancel ", !rename),
+                Input::Confirm(false),
+            ));
+            screen.targets[1] = Some((
+                dialog_button(frame, confirm, " Rename ", rename),
+                Input::Confirm(true),
+            ));
+            frame.render_widget(
+                Paragraph::new("Tab/Shift+Tab · Enter · Esc").style(Style::new().fg(MUTED)),
+                hints,
+            );
+        }
+        Mode::Starting | Mode::Restoring => {
+            let [message, notice, hints] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Fill(1),
+                Constraint::Length(help),
+            ])
+            .areas(content);
+            let text = if dialog.mode == Mode::Starting {
+                "Waiting for AirPlay…"
+            } else {
+                "Restoring the previous receiver…"
+            };
+            frame.render_widget(Paragraph::new(text).style(Style::new().fg(MUTED)), message);
+            draw_notice(frame, dialog, false, notice);
+            let escape = if dialog.mode == Mode::Starting {
+                "Esc · Cancel"
+            } else {
+                "Esc · Close"
+            };
+            frame.render_widget(Paragraph::new(escape).style(Style::new().fg(MUTED)), hints);
+        }
+    }
+    screen
+}
+
+fn draw_notice(frame: &mut Frame, dialog: &Dialog, unavailable: bool, area: Rect) {
+    let mut lines = Vec::new();
+    if unavailable {
+        lines.push(Line::styled("Receiver unavailable", Style::new().bold()));
+    }
+    if let Some(error) = &dialog.error {
+        lines.extend(error.lines().map(Line::from));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::new().fg(WARNING))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn option_style(focused: bool, locked: bool) -> Style {
+    if focused {
+        Style::new().fg(ACCENT).bg(BORDER).bold()
+    } else if locked {
+        Style::new().fg(MUTED)
+    } else {
+        Style::new().fg(TEXT)
+    }
+}
+
+fn dialog_button(frame: &mut Frame, area: Rect, label: &str, focused: bool) -> Rect {
+    let width = area.width.min(label.len() as u16);
+    let area = Rect::new(area.right() - width, area.y, width, area.height);
+    frame.render_widget(
+        Paragraph::new(label).style(option_style(focused, false).bg(BORDER)),
+        area,
+    );
+    area
+}
+
 fn draw_track(
     frame: &mut Frame,
     player: &Player,
+    name: &str,
     area: Rect,
     wide: bool,
     native_graphics: bool,
-) -> Option<Rect> {
+) -> (Option<Rect>, [Rect; 3]) {
     let title = match player.visualizer {
         Some(Visualizer::Ribbons) => " Now Playing · Ribbons ",
         Some(Visualizer::Spectrum) => " Now Playing · Spectrum ",
@@ -220,15 +536,21 @@ fn draw_track(
     let content = shell.inner(area);
     frame.render_widget(shell, area);
     if content.is_empty() {
-        return None;
+        return (None, [Rect::ZERO; 3]);
     }
 
-    let [cover_area, details] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(3)]).areas(content);
-    let details = if wide || player.visualizer.is_some() {
-        details
+    let [media, controls, details] = if (wide || player.visualizer.is_some()) && content.height >= 5
+    {
+        Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(1),
+            Constraint::Length(3),
+        ])
+        .areas(content)
     } else {
-        content
+        let [details, controls] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(content);
+        [Rect::ZERO, controls, details]
     };
     let lines = if let Some(track) = &player.track {
         vec![
@@ -238,34 +560,40 @@ fn draw_track(
         ]
     } else {
         let message = if player.connected {
-            "Waiting for track details"
+            Cow::Borrowed("Waiting for track details")
+        } else if player.reconnect {
+            Cow::Owned(format!("Reconnect to {name} in Apple Music"))
+        } else if player.receiver_unavailable {
+            Cow::Borrowed("Open Settings to retry")
         } else {
-            "Select receiver in Apple Music"
+            Cow::Borrowed("Select receiver in Apple Music")
         };
         vec![Line::styled(message, Style::new().fg(MUTED))]
     };
-    frame.render_widget(Paragraph::new(lines).centered(), details);
+    let details_text = Paragraph::new(lines).centered();
+    let details_text = if player.track.is_none() {
+        details_text.wrap(Wrap { trim: true })
+    } else {
+        details_text
+    };
+    frame.render_widget(details_text, details);
 
+    let buttons = draw_transport(frame, player.transport, controls);
     if let Some(visualizer) = player.visualizer {
-        draw_visualizer(frame, cover_area, visualizer, player.spectrum.as_ref());
-        return None;
+        draw_visualizer(frame, media, visualizer, player.spectrum.as_ref());
+        return (None, buttons);
     }
-    if !wide || cover_area.height < 3 {
-        return None;
+    if media.height < 3 {
+        return (None, buttons);
     }
     if let Some(image) = &player.artwork {
-        let cover = fit_cover(cover_area, image);
+        let cover = fit_cover(media, image);
         if native_graphics {
-            return Some(cover);
+            return (Some(cover), buttons);
         }
         draw_half_blocks(frame, image, cover);
     } else if player.track.is_some() {
-        let line = Rect::new(
-            cover_area.x,
-            cover_area.y + cover_area.height / 2,
-            cover_area.width,
-            1,
-        );
+        let line = Rect::new(media.x, media.bottom() - 1, media.width, 1);
         frame.render_widget(
             Paragraph::new("No artwork")
                 .style(Style::new().fg(DIM))
@@ -273,7 +601,7 @@ fn draw_track(
             line,
         );
     }
-    None
+    (None, buttons)
 }
 
 fn draw_visualizer(
@@ -291,7 +619,7 @@ fn draw_visualizer(
     let chart_height = area.height.min(plot_width.div_ceil(2));
     let area = Rect::new(
         area.x + (area.width - plot_width) / 2,
-        area.y + (area.height - chart_height) / 2,
+        area.bottom() - chart_height,
         plot_width,
         chart_height,
     );
@@ -433,7 +761,7 @@ fn fit_cover(area: Rect, image: &DynamicImage) -> Rect {
     let height = max_height.min((f64::from(width) / ratio).round().max(1.0) as u16);
     Rect::new(
         area.x + (area.width - width) / 2,
-        area.y + (area.height - height) / 2,
+        area.bottom() - height,
         width,
         height,
     )
@@ -618,7 +946,7 @@ fn wide_layout_gives_album_art_room_to_grow() {
         let mut terminal = Terminal::new(TestBackend::new(columns, rows)).unwrap();
         let mut screen = Screen::default();
         terminal
-            .draw(|frame| screen = draw(frame, &player, "Test", true, now))
+            .draw(|frame| screen = draw(frame, &player, "Test", true, now, None))
             .unwrap();
         let cover = screen.cover.unwrap();
         assert!(
@@ -629,7 +957,7 @@ fn wide_layout_gives_album_art_room_to_grow() {
 
         terminal
             .draw(|frame| {
-                draw(frame, &player, "Test", false, now);
+                draw(frame, &player, "Test", false, now, None);
             })
             .unwrap();
         let painted = terminal
@@ -677,6 +1005,76 @@ fn wrapped_lyrics_keep_word_highlighting_across_rows() {
     );
 }
 
+#[cfg(test)]
+#[test]
+fn settings_dialog_owns_input_and_uses_a_fullscreen_compact_layout() {
+    use crate::settings::{Intent, Overrides, Store};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let now = Instant::now();
+    let mut player = Player::default();
+    player.transport = true;
+    player.artwork = Some(DynamicImage::new_rgb8(10, 10));
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(
+        Ok(directory.path().join("settings.json")),
+        Overrides::default(),
+    );
+    let mut dialog = Dialog::new(&store);
+
+    for (width, height) in [(100, 32), (38, 15)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut base = Screen::default();
+        let mut overlay = Screen::default();
+        terminal
+            .draw(|frame| base = draw(frame, &player, "Home", true, now, None))
+            .unwrap();
+        assert_eq!(
+            base.click(base.settings.x, base.settings.y),
+            Some(Action::OpenSettings)
+        );
+        assert_eq!(
+            base.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
+            Some(Action::OpenSettings)
+        );
+        terminal
+            .draw(|frame| overlay = draw(frame, &player, "Home", true, now, Some(&dialog)))
+            .unwrap();
+        assert_eq!(
+            overlay.modal.as_ref().unwrap().area == Rect::new(0, 0, width, height),
+            width < 62
+        );
+        assert!(overlay.cover.is_none());
+        assert_eq!(overlay.click(base.buttons[3].x, base.buttons[3].y), None);
+        for character in ['p', ' ', 'n'] {
+            assert_eq!(
+                overlay.key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
+                Some(Action::Settings(Input::Character(character)))
+            );
+        }
+        let mut press = |code, modifiers| {
+            let Some(Action::Settings(input)) = overlay.key(KeyEvent::new(code, modifiers)) else {
+                panic!("key did not reach Settings");
+            };
+            dialog.edit(input)
+        };
+        press(KeyCode::Char('音'), KeyModifiers::SHIFT);
+        press(KeyCode::Char('楽'), KeyModifiers::NONE);
+        press(KeyCode::Tab, KeyModifiers::NONE);
+        press(KeyCode::Enter, KeyModifiers::NONE);
+        press(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(
+            press(KeyCode::Esc, KeyModifiers::NONE),
+            Some(Intent::Dismiss)
+        );
+        assert_eq!(dialog.focus, Field::Name);
+        assert_eq!(dialog.draft.name, "音楽");
+        assert!(!dialog.online_lyrics());
+        assert!(store.online_lyrics());
+        dialog = Dialog::new(&store);
+    }
+}
+
 fn draw_progress(frame: &mut Frame, player: &Player, area: Rect) {
     let (position, duration, ratio) = player.timing.map_or_else(
         || ("--:--".to_owned(), "--:--".to_owned(), 0.0),
@@ -700,38 +1098,49 @@ fn draw_progress(frame: &mut Frame, player: &Player, area: Rect) {
     );
 }
 
-fn draw_buttons(frame: &mut Frame, player: &Player, area: Rect, columns: u16) -> [Rect; 4] {
-    let discord = format!("Discord · {}", player.discord.label());
-    let labels = [
-        "p  Previous",
-        "Space  Play/Pause",
-        "n  Next",
-        discord.as_str(),
-    ];
-    std::array::from_fn(|index| {
-        let row = index as u16 / columns;
-        let column = index as u16 % columns;
-        if row >= area.height {
-            return Rect::ZERO;
-        }
-        let start = area.width * column / columns;
-        let end = area.width * (column + 1) / columns;
-        let button = Rect::new(area.x + start, area.y + row, end - start, 1);
-        let color = if index < 3 {
-            if player.transport { TEXT } else { DIM }
-        } else {
-            match player.discord {
-                PresenceStatus::Off => MUTED,
-                PresenceStatus::Sharing => ACCENT,
-                PresenceStatus::Unavailable => WARNING,
-            }
-        };
-        frame.render_widget(
-            Paragraph::new(labels[index])
-                .centered()
-                .style(Style::new().fg(color).bg(SURFACE)),
-            button,
-        );
+fn draw_transport(frame: &mut Frame, enabled: bool, area: Rect) -> [Rect; 3] {
+    let labels = if area.width >= 30 {
+        [" Previous ", " Play/Pause ", " Next "]
+    } else if area.width >= 11 {
+        [" ⏮ ", " ⏯ ", " ⏭ "]
+    } else {
+        ["⏮", "⏯", "⏭"]
+    };
+    let gap = u16::from(area.width >= 5);
+    let width = labels.iter().map(|label| label.width() as u16).sum::<u16>() + 2 * gap;
+    if area.height == 0 || width > area.width {
+        return [Rect::ZERO; 3];
+    }
+    let mut x = area.x + (area.width - width) / 2;
+    let style = if enabled {
+        Style::new().fg(TEXT).bg(BORDER)
+    } else {
+        Style::new().fg(DIM).bg(BACKGROUND)
+    };
+    labels.map(|label| {
+        let button = Rect::new(x, area.y, label.width() as u16, 1);
+        frame.render_widget(Paragraph::new(label).style(style), button);
+        x = button.right() + gap;
         button
     })
+}
+
+fn draw_discord(frame: &mut Frame, player: &Player, area: Rect) -> Rect {
+    let label = format!(" Discord · {} ", player.discord.label());
+    let color = match player.discord {
+        PresenceStatus::Off => MUTED,
+        PresenceStatus::Sharing => ACCENT,
+        PresenceStatus::Unavailable => WARNING,
+    };
+    let area = Rect::new(
+        area.x,
+        area.y,
+        area.width.min(label.width() as u16),
+        area.height,
+    );
+    frame.render_widget(
+        Paragraph::new(label).style(Style::new().fg(color).bg(SURFACE)),
+        area,
+    );
+    area
 }
