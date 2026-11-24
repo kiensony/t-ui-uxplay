@@ -1,5 +1,5 @@
 use crate::{
-    settings::Dialog,
+    settings::{Dialog, Palette},
     state::Player,
     ui::{self, Screen},
 };
@@ -53,10 +53,19 @@ impl PlayerTerminal {
         name: &str,
         now: Instant,
         dialog: Option<&Dialog>,
+        palette: Palette,
     ) -> io::Result<Screen> {
         let mut screen = Screen::default();
         self.terminal.draw(|frame| {
-            screen = ui::draw(frame, player, name, self.graphics.enabled, now, dialog);
+            screen = ui::draw(
+                frame,
+                player,
+                name,
+                self.graphics.enabled,
+                now,
+                dialog,
+                palette,
+            );
         })?;
         self.graphics.present(
             player.artwork.as_ref(),

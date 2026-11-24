@@ -46,11 +46,37 @@ impl View {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Palette {
+    #[default]
+    Default,
+    FemboyTransgirl,
+}
+
+impl Palette {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::FemboyTransgirl => "Femboy / Transgirl",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Default => Self::FemboyTransgirl,
+            Self::FemboyTransgirl => Self::Default,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Settings {
     pub name: String,
     pub online_lyrics: bool,
     pub view: View,
+    #[serde(default)]
+    pub palette: Palette,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discord_app_id: Option<String>,
 }
@@ -61,6 +87,7 @@ impl Default for Settings {
             name: "t-ui-uxplay".into(),
             online_lyrics: true,
             view: View::Cover,
+            palette: Palette::default(),
             discord_app_id: None,
         }
     }
@@ -225,6 +252,7 @@ pub enum Field {
     Name,
     Lyrics,
     View,
+    Palette,
     DiscordAppId,
     Save,
 }
@@ -296,7 +324,7 @@ impl Dialog {
             Field::Name => self.overrides.name.is_some(),
             Field::Lyrics => self.overrides.no_online_lyrics,
             Field::DiscordAppId => self.overrides.discord_app_id.is_some(),
-            Field::View | Field::Save => false,
+            Field::View | Field::Palette | Field::Save => false,
         }
     }
 
@@ -305,6 +333,7 @@ impl Dialog {
             Field::Name,
             Field::Lyrics,
             Field::View,
+            Field::Palette,
             Field::DiscordAppId,
             Field::Save,
         ]
@@ -433,6 +462,7 @@ impl Dialog {
             Field::Name | Field::DiscordAppId => self.text_selected = true,
             Field::Lyrics => self.draft.online_lyrics = !self.draft.online_lyrics,
             Field::View => self.draft.view = self.draft.view.next(),
+            Field::Palette => self.draft.palette = self.draft.palette.next(),
             Field::Save => return Some(Intent::Save),
         }
         None
@@ -442,6 +472,38 @@ impl Dialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn palette_defaults_for_older_settings_and_round_trips_through_the_dialog() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"name":"Home","online_lyrics":false,"view":"ribbons"}"#,
+        )
+        .unwrap();
+        let mut store = Store::open(Ok(path.clone()), Overrides::default());
+        for (initial, next) in [
+            (Palette::Default, Palette::FemboyTransgirl),
+            (Palette::FemboyTransgirl, Palette::Default),
+        ] {
+            assert!(store.error.is_none());
+            assert_eq!(store.saved.palette, initial);
+            let mut dialog = Dialog::new(&store);
+            for _ in 0..3 {
+                dialog.edit(Input::Tab(false));
+            }
+            dialog.edit(Input::Enter);
+            assert_eq!(dialog.draft.palette, next);
+            assert_eq!(store.saved.palette, initial);
+            store.save(dialog.draft).unwrap();
+            store = Store::open(Ok(path.clone()), Overrides::default());
+            assert_eq!(store.saved.palette, next);
+            assert_eq!(store.name(), "Home");
+            assert_eq!(store.saved.view, View::Ribbons);
+            assert!(!store.online_lyrics());
+        }
+    }
 
     #[test]
     fn discord_application_id_can_be_edited_saved_and_cleared() {
@@ -489,6 +551,7 @@ mod tests {
                 name: "  ห้อง 音楽  ".into(),
                 online_lyrics: true,
                 view: View::Ribbons,
+                palette: Palette::default(),
                 discord_app_id: Some("12345".into()),
             })
             .unwrap();

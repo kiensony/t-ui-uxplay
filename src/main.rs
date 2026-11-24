@@ -118,6 +118,7 @@ fn main() -> Result<()> {
             app.settings.name(),
             now,
             app.dialog.as_ref(),
+            app.settings.saved.palette,
         )?;
         let frame_ms = if app.session.player.visualizer.is_some() {
             42

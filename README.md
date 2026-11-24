@@ -81,6 +81,8 @@ The Ribbons preset uses the live AirPlay audio to rotate and warp neon trails. S
 
 Click **Settings** or press `s`. Use `Tab` and `Shift+Tab` to move between fields, `Enter` to activate a field, and `Esc` to discard the draft. Enter a speaker name of up to 50 UTF-8 bytes. Choose **Save** to apply your changes. A rename restarts AirPlay and asks for confirmation if a sender is connected. Then reconnect using the new name.
 
+**Color palette** starts on **Default**. Click the field or press `Enter` while it’s focused to preview **Femboy / Transgirl**, which uses pink and light blue throughout the player and visualizers. Choose **Save** to keep the palette for future sessions.
+
 **Online lyrics** starts On and **Default view** starts on Cover. Settings are stored in `t-ui-uxplay/settings.json` under `$XDG_CONFIG_HOME` (or `~/.config`) on Linux, `~/Library/Application Support` on macOS, and `%APPDATA%` on Windows. `--name`, `--no-online-lyrics`, and `--discord-app-id` override and lock their corresponding fields for that launch.
 
 LRCLIB lookups send the title, artist, album, and available duration. If the first result has line timings, the player also checks for word timings on a release with the same song, artist, and a similar duration. Results are cached until the player quits. Turn **Online lyrics** off to clear the panel and stop lookups.

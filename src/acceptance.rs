@@ -1,10 +1,10 @@
-use crate::{dacp, discord, lyrics, receiver, state, ui};
+use crate::{dacp, discord, lyrics, receiver, settings::Palette, state, ui};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 #[test]
 fn now_playing_cycles_through_cover_ribbons_and_spectrum() {
     use crossterm::event::KeyCode;
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{Terminal, backend::TestBackend, style::Color};
 
     assert_eq!(
         ui::key_action(KeyCode::Char('v')),
@@ -21,15 +21,18 @@ fn now_playing_cycles_through_cover_ribbons_and_spectrum() {
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     let mut screen = ui::Screen::default();
     terminal
-        .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now, None))
+        .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now, None, Palette::Default))
         .unwrap();
     assert!(screen.cover.is_some());
 
-    for (width, height) in [(100, 30), (48, 25)] {
+    for (width, height, palette, bass_color) in [
+        (100, 30, Palette::Default, Color::Rgb(89, 241, 130)),
+        (48, 25, Palette::FemboyTransgirl, Color::Rgb(91, 206, 250)),
+    ] {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         player.cycle_visualizer();
         terminal
-            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now, None))
+            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now, None, palette))
             .unwrap();
         assert!(screen.cover.is_none());
         let ribbons = terminal.backend().buffer().content.clone();
@@ -40,22 +43,26 @@ fn now_playing_cycles_through_cover_ribbons_and_spectrum() {
         spectrum.phase += 0.8;
         player.spectrum = Some(spectrum);
         terminal
-            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now, None))
+            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now, None, palette))
             .unwrap();
         assert_ne!(terminal.backend().buffer().content, ribbons);
 
         player.cycle_visualizer();
         terminal
-            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now, None))
+            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now, None, palette))
             .unwrap();
         assert!(screen.cover.is_none());
         let cells = &terminal.backend().buffer().content;
-        assert!(cells.iter().any(|cell| cell.symbol() == "▄"));
+        assert!(
+            cells
+                .iter()
+                .any(|cell| cell.symbol() == "▄" && cell.fg == bass_color)
+        );
         assert!(cells.iter().any(|cell| cell.symbol() == "━"));
 
         player.cycle_visualizer();
         terminal
-            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now, None))
+            .draw(|frame| screen = ui::draw(frame, &player, "Test", true, now, None, palette))
             .unwrap();
         assert_eq!(screen.cover.is_some(), width == 100);
         assert_eq!(player.visualizer, None);
@@ -253,6 +260,7 @@ fn unavailable_transport_cannot_be_clicked_in_compact_layout() {
                 false,
                 Instant::now(),
                 None,
+                Palette::Default,
             ));
         })
         .unwrap();
@@ -290,7 +298,7 @@ fn transport_sits_directly_below_native_artwork() {
     let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
     let mut screen = ui::Screen::default();
     terminal
-        .draw(|frame| screen = ui::draw(frame, &player, "Home", true, now, None))
+        .draw(|frame| screen = ui::draw(frame, &player, "Home", true, now, None, Palette::Default))
         .unwrap();
     let cover = screen.cover.unwrap();
     assert_eq!(screen.buttons[0].y, cover.bottom());
@@ -307,7 +315,7 @@ fn transport_sits_directly_below_native_artwork() {
     assert!(screen.buttons[3].y > screen.buttons[2].y);
 
     terminal
-        .draw(|frame| screen = ui::draw(frame, &player, "Home", false, now, None))
+        .draw(|frame| screen = ui::draw(frame, &player, "Home", false, now, None, Palette::Default))
         .unwrap();
     assert!(screen.cover.is_none());
     assert_eq!(screen.buttons[0].y, cover.bottom());

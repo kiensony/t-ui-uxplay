@@ -532,7 +532,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::Player;
+    use crate::{settings::Palette, state::Player};
     use ratatui::{Terminal, backend::TestBackend, buffer::Cell, style::Modifier};
     use std::time::{Instant, UNIX_EPOCH};
 
@@ -597,7 +597,7 @@ lines:
             let at = now + Duration::from_millis(offset_ms);
             terminal
                 .draw(|frame| {
-                    crate::ui::draw(frame, &player, "Test", false, at, None);
+                    crate::ui::draw(frame, &player, "Test", false, at, None, Palette::Default);
                 })
                 .unwrap();
             assert_eq!(
@@ -659,6 +659,7 @@ lines:
                     false,
                     now + Duration::from_millis(475),
                     None,
+                    Palette::Default,
                 );
             })
             .unwrap();
