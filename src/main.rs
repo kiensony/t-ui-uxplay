@@ -51,7 +51,7 @@ struct Options {
     #[arg(long, value_parser = application_id)]
     discord_app_id: Option<String>,
 
-    /// Keep track details local and skip LRCLIB lookups
+    /// Skip online lyrics lookups through LRCLIB
     #[arg(long)]
     no_online_lyrics: bool,
 }
@@ -99,7 +99,10 @@ fn main() -> Result<()> {
     let mut app = App::new(settings, options.uxplay, Instant::now())?;
     let discord = discord::Worker::spawn()?;
 
-    let mut sharing = Sharing::default();
+    let mut sharing = Sharing {
+        artwork: discord::Artwork::spawn().ok(),
+        ..Sharing::default()
+    };
     loop {
         #[cfg(unix)]
         if stop.load(Ordering::Relaxed) {
@@ -292,6 +295,7 @@ struct Sharing {
     enabled: bool,
     submitted: discord::Desired,
     revision: u64,
+    artwork: Option<discord::Artwork>,
 }
 
 impl Sharing {
@@ -303,9 +307,15 @@ impl Sharing {
         now: Instant,
     ) {
         let application_id = application_id.filter(|_| self.enabled);
-        let activity = application_id
-            .and(player.track.as_ref())
-            .map(|track| discord::Listening::new(track, player.timing, now));
+        let track = application_id.and(player.track.as_ref());
+        let cover = self.artwork.as_mut().and_then(|artwork| {
+            artwork.cover(track.filter(|_| player.discord == PresenceStatus::Sharing))
+        });
+        let activity = application_id.map(|_| {
+            track.map_or_else(discord::Playing::default, |track| {
+                discord::Playing::new(track, player.timing, now, cover)
+            })
+        });
         let desired = discord::Desired {
             enabled: self.enabled,
             application_id: application_id.map(str::to_owned),

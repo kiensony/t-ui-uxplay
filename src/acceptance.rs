@@ -337,14 +337,28 @@ fn speaker_name_validation_counts_utf8_bytes() {
 }
 
 #[test]
-fn discord_activity_contains_song_artist_and_listening_type() {
-    let activity = discord::Listening::new(&track("One"), None, Instant::now()).payload();
-    assert_eq!(activity["type"], 2);
-    assert_eq!(activity["name"], "One");
-    assert_eq!(activity["status_display_type"], 2);
+fn discord_activity_contains_song_artist_and_playing_type() {
+    let activity = discord::Playing::new(&track("One"), None, Instant::now(), None).payload();
+    assert_eq!(activity["type"], 0);
+    assert!(activity.get("name").is_none());
+    assert!(activity.get("status_display_type").is_none());
     assert_eq!(activity["details"], "One");
     assert_eq!(activity["state"], "Miles Davis");
     assert!(activity.get("timestamps").is_none());
+}
+
+#[test]
+fn discord_activity_uses_album_cover_when_available() {
+    let cover = "https://archive.org/cover.jpg";
+    let activity = discord::Playing::new(&track("One"), None, Instant::now(), Some(cover));
+    assert_eq!(activity.payload()["assets"]["large_image"], cover);
+
+    let fallback = discord::Playing::new(&track("Two"), None, Instant::now(), None);
+    assert!(fallback.payload().get("assets").is_none());
+    assert_eq!(
+        discord::Playing::default().payload(),
+        serde_json::json!({ "type": 0 })
+    );
 }
 
 #[test]
@@ -356,10 +370,11 @@ fn discord_progress_reanchors_after_seeks_and_holds_when_playback_stalls() {
     player.progress(42, 210, start, wall);
     player.set_track(Some(track("One")), start);
     let payload = |player: &state::Player, offset: Duration| {
-        discord::Listening::new(
+        discord::Playing::new(
             player.track.as_ref().unwrap(),
             player.timing,
             start + offset,
+            None,
         )
         .payload()
     };
@@ -404,7 +419,7 @@ fn discord_progress_reanchors_after_seeks_and_holds_when_playback_stalls() {
     );
     player.set_track(Some(track("Two")), start + Duration::from_secs(7));
     let changed = payload(&player, Duration::from_secs(7));
-    assert_eq!(changed["name"], "Two");
+    assert_eq!(changed["details"], "Two");
     assert_eq!(changed["state"], "Miles Davis");
     assert!(changed.get("timestamps").is_none());
 }

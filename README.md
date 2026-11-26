@@ -91,7 +91,7 @@ The lyrics panel shows **Word sync** when the words can light up progressively a
 
 ## Discord Rich Presence
 
-Create an application in the Discord Developer Portal and copy its **Application ID**. In the receiver, open **Settings** with `s`, enter the ID in **Discord Application ID**, and choose **Save**. If sharing is active, the receiver switches to the new Discord application. Clear the field and save to remove the saved ID. Start the signed-in Discord desktop app on the same computer. [Discord Developer Portal](https://discord.com/developers/applications)
+Create an application in the Discord Developer Portal. Give it the name you want Discord to display, set its **App Icon** for the fallback artwork, and copy its **Application ID**. In the receiver, open **Settings** with `s`, enter the ID in **Discord Application ID**, and choose **Save**. If sharing is active, the receiver switches to the new Discord application. Clear the field and save to remove the saved ID. Start the signed-in Discord desktop app on the same computer. [Discord Developer Portal](https://discord.com/developers/applications)
 
 To override the saved ID for one launch, pass it on the command line.
 
@@ -99,9 +99,9 @@ To override the saved ID for one launch, pass it on the command line.
 t-ui-uxplay --discord-app-id YOUR_APPLICATION_ID
 ```
 
-Sharing starts **Off** each launch. Click **Discord** or press `d` to enable it. **Sharing** means Discord IPC is connected. While a track is available, the activity is **Listening** and includes the title and artist. **Unavailable** means the app could not publish or reach Discord, or no application ID was configured. The player retries IPC while enabled. It clears the activity when sharing is turned off, the sender disconnects, or the player quits.
+Sharing starts **Off** each launch. Click **Discord** or press `d` to scan for the desktop client's local IPC socket or Windows named pipe. **Sharing** means Discord IPC is connected and Rich Presence shows **Playing** with the configured application name. **Unavailable** means the app could not publish or reach Discord, or no application ID was configured. The player retries IPC while enabled. It clears the activity when sharing is turned off or the player quits.
 
-Discord uses the song title in **Listening to**. When AirPlay sends track timing, the activity card shows a live progress bar with elapsed time and total track length, such as `1:20 / 3:30`. The bar updates after a seek. After three seconds without progress, the card shows the last reported time as text until playback advances again. If AirPlay provides no timing for the track, the card shows the song and artist.
+The activity card includes the song title, artist, and available timing. While connected to Discord IPC, the player sends the album and artist names to MusicBrainz to look up a public cover from the Cover Art Archive. The activity uses the application's icon while the lookup is pending, when the cover is unavailable, and when the sender disconnects. The sender's local AirPlay artwork stays on the receiver. [MusicBrainz API](https://musicbrainz.org/doc/MusicBrainz_API), [Cover Art Archive](https://musicbrainz.org/doc/Cover_Art_Archive)
 
 ## Verify
 
@@ -113,7 +113,7 @@ cargo test
 
 Before release, stream Apple Music from an iPhone on the same network. On Linux, macOS, and Windows, rename the speaker from Settings, reconnect under the new name, and use Previous, Play/Pause, and Next. Verify audio playback, track changes, artwork, pause and seek alignment, and cleanup when the sender disconnects. Check artwork in a Kitty graphics terminal and a fallback terminal.
 
-With a Discord application ID configured, view the Listening activity from another Discord account. Verify the song title, live progress bar, and elapsed and total times. Seek in both directions, pause for at least three seconds, resume, and switch tracks. Verify the activity clears when sharing is turned off, the sender disconnects, and the receiver quits.
+With a Discord application ID and icon configured, view the Playing activity from another Discord account. Verify a catalogued album shows its cover and a track with no matching cover shows the app icon. Disconnect the sender and check that the track details clear and the app icon returns. Verify the activity clears when sharing is turned off or the receiver quits.
 
 ## GitHub Actions
 

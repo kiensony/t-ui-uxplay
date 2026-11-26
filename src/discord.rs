@@ -15,6 +15,9 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
+mod artwork;
+pub use artwork::Artwork;
+
 #[cfg(windows)]
 mod windows;
 
@@ -39,7 +42,7 @@ pub struct Worker {
 pub struct Desired {
     pub enabled: bool,
     pub application_id: Option<String>,
-    pub activity: Option<Listening>,
+    pub activity: Option<Playing>,
 }
 
 impl Worker {
@@ -147,7 +150,7 @@ fn run(paths: &[PathBuf], inbox: Receiver<(u64, Desired)>, report: Sender<(u64, 
     clear(&mut connection, &mut published);
 }
 
-fn clear(connection: &mut Option<Ipc>, published: &mut Option<Listening>) {
+fn clear(connection: &mut Option<Ipc>, published: &mut Option<Playing>) {
     if let Some(mut ipc) = connection.take()
         && published.take().is_some()
     {
@@ -190,10 +193,11 @@ fn socket_paths() -> Vec<PathBuf> {
         .collect()
 }
 
-#[derive(Clone, PartialEq, Eq)]
-pub struct Listening {
-    track: Track,
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Playing {
+    track: Option<Track>,
     progress: Option<Progress>,
+    cover: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -202,8 +206,8 @@ enum Progress {
     Still { position: u32, duration: u32 },
 }
 
-impl Listening {
-    pub fn new(track: &Track, timing: Option<Timing>, now: Instant) -> Self {
+impl Playing {
+    pub fn new(track: &Track, timing: Option<Timing>, now: Instant, cover: Option<&str>) -> Self {
         let progress = timing.map(|timing| {
             // Discord's local SET_ACTIVITY request uses Unix seconds.
             if timing.is_advancing(now)
@@ -222,27 +226,23 @@ impl Listening {
             }
         });
         Self {
-            track: track.clone(),
+            track: Some(track.clone()),
             progress,
+            cover: cover.map(str::to_owned),
         }
     }
 
     pub fn payload(&self) -> Value {
         const TEXT_LIMIT: usize = 128;
-        let title = self
-            .track
-            .title
-            .chars()
-            .take(TEXT_LIMIT)
-            .collect::<String>();
-        let mut activity = json!({
-            "type": 2,
-            "status_display_type": 2,
-            "name": title,
-            "details": title,
-        });
-
-        let mut state: String = self.track.artist.chars().take(TEXT_LIMIT).collect();
+        let mut activity = json!({ "type": 0 });
+        let Some(track) = &self.track else {
+            return activity;
+        };
+        activity["details"] = json!(track.title.chars().take(TEXT_LIMIT).collect::<String>());
+        if let Some(cover) = &self.cover {
+            activity["assets"] = json!({ "large_image": cover });
+        }
+        let mut state: String = track.artist.chars().take(TEXT_LIMIT).collect();
         match self.progress {
             Some(Progress::Advancing { start, end }) => {
                 activity["timestamps"] = json!({ "start": start, "end": end });
@@ -284,7 +284,19 @@ impl Ipc {
         Ok(ipc)
     }
 
-    fn set_activity(&mut self, activity: Option<&Listening>) -> io::Result<()> {
+    fn set_activity(&mut self, activity: Option<&Playing>) -> io::Result<()> {
+        let mut payload = activity.map_or(Value::Null, Playing::payload);
+        let result = self.send_activity(&payload);
+        if matches!(&result, Err(error) if error.kind() == io::ErrorKind::InvalidInput)
+            && let Some(activity) = payload.as_object_mut()
+            && activity.remove("assets").is_some()
+        {
+            return self.send_activity(&payload);
+        }
+        result
+    }
+
+    fn send_activity(&mut self, activity: &Value) -> io::Result<()> {
         self.nonce += 1;
         let nonce = self.nonce.to_string();
         self.send_json(
@@ -292,7 +304,7 @@ impl Ipc {
             &json!({
                 "cmd": "SET_ACTIVITY",
                 "nonce": nonce,
-                "args": { "pid": std::process::id(), "activity": activity.map(Listening::payload) },
+                "args": { "pid": std::process::id(), "activity": activity },
             }),
         )?;
         self.wait_for(|data| data["cmd"] == "SET_ACTIVITY" && data["nonce"] == nonce)
@@ -354,7 +366,10 @@ impl Ipc {
             FRAME => {
                 let value: Value = serde_json::from_slice(&data)?;
                 if value["evt"] == "ERROR" {
-                    return Err(io::Error::other("Discord rejected the activity"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Discord rejected the request",
+                    ));
                 }
                 Ok(Some(value))
             }
@@ -396,8 +411,9 @@ mod tests {
     #[test]
     fn reconnects_and_clears_on_disconnect_toggle_and_shutdown() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("discord-ipc-0");
-        let worker = Worker::start(vec![path.clone()]).unwrap();
+        let path = directory.path().join("discord-ipc-3");
+        let worker =
+            Worker::start(vec![directory.path().join("discord-ipc-0"), path.clone()]).unwrap();
         let update = |revision, enabled, id: Option<&str>, activity| {
             worker.update(
                 revision,
@@ -421,42 +437,55 @@ mod tests {
             ..one.clone()
         };
         let now = Instant::now();
-        let one = Listening::new(&one, None, now);
-        let two = Listening::new(&two, None, now);
-        update(1, true, first_id, Some(one.clone()));
+        let cover = "https://archive.org/cover.jpg";
+        let one = Playing::new(&one, None, now, Some(cover));
+        let two_activity = Playing::new(&two, None, now, None);
+        let idle = Playing::default();
+        update(1, true, first_id, Some(idle.clone()));
         wait_for(&worker, 1, PresenceStatus::Unavailable);
 
         let listener = UnixListener::bind(path).unwrap();
         listener.set_nonblocking(true).unwrap();
         let mut initial = accept(&listener, "12345");
-        assert_eq!(activity_request(&mut initial), one.payload());
+        assert_eq!(activity_request(&mut initial), idle.payload());
         wait_for(&worker, 1, PresenceStatus::Sharing);
+        update(2, true, first_id, Some(one.clone()));
+        let request = read_activity_request(&mut initial);
+        assert_eq!(request["args"]["activity"]["assets"]["large_image"], cover);
+        reply(
+            &mut initial,
+            json!({"cmd": "SET_ACTIVITY", "nonce": request["nonce"], "evt": "ERROR"}),
+        );
+        let fallback = activity_request(&mut initial);
+        assert_eq!(fallback["details"], "One");
+        assert!(fallback.get("assets").is_none());
+        wait_for(&worker, 2, PresenceStatus::Sharing);
         drop(initial);
 
-        wait_for(&worker, 1, PresenceStatus::Unavailable);
-        update(2, true, first_id, Some(two.clone()));
+        wait_for(&worker, 2, PresenceStatus::Unavailable);
+        update(2, true, first_id, Some(two_activity.clone()));
         let mut reconnected = accept(&listener, "12345");
-        assert_eq!(activity_request(&mut reconnected), two.payload());
+        assert_eq!(activity_request(&mut reconnected), two_activity.payload());
         wait_for(&worker, 2, PresenceStatus::Sharing);
 
         let now = Instant::now();
         let mut player = crate::state::Player::default();
         let wall_time = UNIX_EPOCH + Duration::from_secs(1_790_000_000);
         player.progress(0, 210, now, wall_time);
-        let timed = Listening::new(&two.track, player.timing, now);
+        let timed = Playing::new(&two, player.timing, now, None);
         update(3, true, next_id, Some(timed));
         assert_eq!(activity_request(&mut reconnected), Value::Null);
         let mut reconnected = accept(&listener, "67890");
         let request = activity_request(&mut reconnected);
-        assert_eq!(request["name"], "Two");
+        assert_eq!(request["details"], "Two");
         assert_eq!(
             request["timestamps"],
             json!({ "start": 1_790_000_000_u64, "end": 1_790_000_210_u64 })
         );
         wait_for(&worker, 3, PresenceStatus::Sharing);
 
-        update(4, true, next_id, None);
-        assert_eq!(activity_request(&mut reconnected), Value::Null);
+        update(4, true, next_id, Some(idle.clone()));
+        assert_eq!(activity_request(&mut reconnected), idle.payload());
         wait_for(&worker, 4, PresenceStatus::Sharing);
         update(5, true, next_id, Some(one.clone()));
         assert_eq!(activity_request(&mut reconnected), one.payload());
@@ -466,18 +495,21 @@ mod tests {
         assert_eq!(activity_request(&mut reconnected), Value::Null);
         wait_for(&worker, 6, PresenceStatus::Unavailable);
 
-        update(7, true, next_id, Some(two.clone()));
+        update(7, true, next_id, Some(two_activity.clone()));
         let mut reconnected = accept(&listener, "67890");
-        assert_eq!(activity_request(&mut reconnected), two.payload());
+        assert_eq!(activity_request(&mut reconnected), two_activity.payload());
         wait_for(&worker, 7, PresenceStatus::Sharing);
 
         update(8, false, None, None);
         assert_eq!(activity_request(&mut reconnected), Value::Null);
         wait_for(&worker, 8, PresenceStatus::Off);
 
-        update(9, true, next_id, Some(two.clone()));
+        update(9, true, next_id, Some(two_activity.clone()));
         let mut final_connection = accept(&listener, "67890");
-        assert_eq!(activity_request(&mut final_connection), two.payload());
+        assert_eq!(
+            activity_request(&mut final_connection),
+            two_activity.payload()
+        );
         wait_for(&worker, 9, PresenceStatus::Sharing);
         let shutdown = thread::spawn(move || drop(worker));
         assert_eq!(activity_request(&mut final_connection), Value::Null);
@@ -527,16 +559,21 @@ mod tests {
     }
 
     fn activity_request(stream: &mut UnixStream) -> Value {
-        let (opcode, data) = read_frame(stream).unwrap();
-        assert_eq!(opcode, FRAME);
-        let data: Value = serde_json::from_slice(&data).unwrap();
-        assert_eq!(data["cmd"], "SET_ACTIVITY");
-        assert_eq!(data["args"]["pid"], std::process::id());
+        let data = read_activity_request(stream);
         reply(
             stream,
             json!({"cmd": "SET_ACTIVITY", "nonce": data["nonce"], "data": null}),
         );
         data["args"]["activity"].clone()
+    }
+
+    fn read_activity_request(stream: &mut UnixStream) -> Value {
+        let (opcode, data) = read_frame(stream).unwrap();
+        assert_eq!(opcode, FRAME);
+        let data: Value = serde_json::from_slice(&data).unwrap();
+        assert_eq!(data["cmd"], "SET_ACTIVITY");
+        assert_eq!(data["args"]["pid"], std::process::id());
+        data
     }
 
     fn reply(stream: &mut UnixStream, data: Value) {
